@@ -1,0 +1,23 @@
+// Test 07: File Read/Write
+// Write file, read back, count lines and characters
+
+fn main() {
+    let content = "Vega was here\nLine 2\nLine 3";
+    file::write("test_output.txt", content);
+
+    let read_content = file::read("test_output.txt");
+
+    // Count lines
+    let lines = 1;
+    let chars = str::len(read_content);
+    let i = 0;
+    while i < chars {
+        if str::char_at(read_content, i) == "\n" {
+            lines = lines + 1;
+        }
+        i = i + 1;
+    }
+
+    print(lines);
+    print(chars);
+}

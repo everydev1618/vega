@@ -1,0 +1,34 @@
+// loops.vega - Test for loops and break/continue
+
+fn main() {
+    // Basic for loop
+    print("For loop 1-5:");
+    for let i = 1; i <= 5; i {
+        print(i);
+        i = i + 1;
+    }
+
+    // While loop with break
+    print("Break at 3:");
+    let j = 1;
+    while j <= 10 {
+        if j == 3 {
+            break;
+        }
+        print(j);
+        j = j + 1;
+    }
+
+    // While loop with continue
+    print("Skip even numbers:");
+    let k = 0;
+    while k < 6 {
+        k = k + 1;
+        if k % 2 == 0 {
+            continue;
+        }
+        print(k);
+    }
+
+    print("Done!");
+}

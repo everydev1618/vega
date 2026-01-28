@@ -1,0 +1,14 @@
+// Test 11: Spawn Single Agent
+// Spawn agent and get a greeting
+
+agent Greeter {
+    model "claude-sonnet-4-20250514"
+    system "You respond with exactly one short greeting. Nothing else."
+    temperature 0.3
+}
+
+fn main() {
+    let greeter = spawn Greeter;
+    let response = greeter <- "Say hi";
+    print(response);
+}

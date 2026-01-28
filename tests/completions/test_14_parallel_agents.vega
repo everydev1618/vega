@@ -1,0 +1,27 @@
+// Test 14: Parallel Agents
+// Spawn 3 workers asynchronously and await responses
+
+agent Worker {
+    model "claude-sonnet-4-20250514"
+    system "Reply with the word you received, repeated 3 times, separated by spaces."
+    temperature 0.0
+}
+
+fn main() {
+    let w1 = spawn Worker async;
+    let w2 = spawn Worker async;
+    let w3 = spawn Worker async;
+
+    let r1 = w1 <- "alpha";
+    let r2 = w2 <- "beta";
+    let r3 = w3 <- "gamma";
+
+    // Await all responses
+    await r1;
+    await r2;
+    await r3;
+
+    print(r1);
+    print(r2);
+    print(r3);
+}

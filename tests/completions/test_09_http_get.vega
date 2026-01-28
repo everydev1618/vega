@@ -1,0 +1,8 @@
+// Test 09: HTTP GET Request
+// Make GET request and parse response
+
+fn main() {
+    let response = http::get("https://httpbin.org/get?test=vega");
+    let test_value = json::get_string(response, "test");
+    print(test_value);
+}

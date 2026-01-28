@@ -1,0 +1,17 @@
+// Test 04: Factorial
+// Print factorial(0) through factorial(10)
+
+fn factorial(n: int) -> int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() {
+    let i = 0;
+    while i <= 10 {
+        print(factorial(i));
+        i = i + 1;
+    }
+}

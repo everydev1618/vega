@@ -1,0 +1,74 @@
+// Test 18: Merge Sort
+// Sort array using merge sort
+
+fn merge(left: int[], right: int[], left_len: int, right_len: int) -> int[] {
+    let result: int[] = [];
+    let i = 0;
+    let j = 0;
+
+    while i < left_len && j < right_len {
+        if left[i] <= right[j] {
+            result = result + [left[i]];
+            i = i + 1;
+        } else {
+            result = result + [right[j]];
+            j = j + 1;
+        }
+    }
+
+    while i < left_len {
+        result = result + [left[i]];
+        i = i + 1;
+    }
+
+    while j < right_len {
+        result = result + [right[j]];
+        j = j + 1;
+    }
+
+    return result;
+}
+
+fn merge_sort(arr: int[], len: int) -> int[] {
+    if len <= 1 {
+        return arr;
+    }
+
+    let mid = len / 2;
+
+    // Build left half
+    let left: int[] = [];
+    let i = 0;
+    while i < mid {
+        left = left + [arr[i]];
+        i = i + 1;
+    }
+
+    // Build right half
+    let right: int[] = [];
+    while i < len {
+        right = right + [arr[i]];
+        i = i + 1;
+    }
+
+    let sorted_left = merge_sort(left, mid);
+    let sorted_right = merge_sort(right, len - mid);
+
+    return merge(sorted_left, sorted_right, mid, len - mid);
+}
+
+fn main() {
+    let arr: int[] = [64, 34, 25, 12, 22, 11, 90, 42];
+    let sorted = merge_sort(arr, 8);
+
+    let result = "";
+    let i = 0;
+    while i < 8 {
+        if i > 0 {
+            result = result + ",";
+        }
+        result = result + str::from_int(sorted[i]);
+        i = i + 1;
+    }
+    print(result);
+}

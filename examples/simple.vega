@@ -1,0 +1,49 @@
+// simple.vega - Test basic language features without agents
+//
+// This can be used to test the compiler and VM without needing an API key.
+
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn factorial(n: int) -> int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() {
+    // Basic arithmetic
+    let x = 10;
+    let y = 20;
+    let sum = add(x, y);
+    print("Sum: ");
+    print(sum);
+
+    // String concatenation
+    let greeting = "Hello, " + "Vega!";
+    print(greeting);
+
+    // Conditionals
+    if sum > 25 {
+        print("Sum is greater than 25");
+    } else {
+        print("Sum is not greater than 25");
+    }
+
+    // Loops
+    let i = 1;
+    while i <= 5 {
+        print(factorial(i));
+        i = i + 1;
+    }
+
+    // String methods
+    let text = "Hello World";
+    if text.has("World") {
+        print("Found 'World' in text");
+    }
+
+    print("Done!");
+}

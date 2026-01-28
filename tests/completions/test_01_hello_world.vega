@@ -1,0 +1,6 @@
+// Test 01: Hello World
+// Prints "Hello, Vega!" to stdout
+
+fn main() {
+    print("Hello, Vega!");
+}

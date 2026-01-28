@@ -1,0 +1,23 @@
+// Test 13: Two Agents in Sequence
+// Pipeline: Researcher -> Summarizer
+
+agent Researcher {
+    model "claude-sonnet-4-20250514"
+    system "You provide one interesting fact about any topic given. Keep it to one sentence."
+    temperature 0.7
+}
+
+agent Summarizer {
+    model "claude-sonnet-4-20250514"
+    system "You rewrite the input in exactly 5 words."
+    temperature 0.3
+}
+
+fn main() {
+    let researcher = spawn Researcher;
+    let summarizer = spawn Summarizer;
+
+    let fact = researcher <- "quantum computing";
+    let summary = summarizer <- fact;
+    print(summary);
+}

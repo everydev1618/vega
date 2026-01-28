@@ -1,0 +1,52 @@
+// Test 20: Simple Calculator REPL
+// Parse and evaluate simple expressions
+
+fn parse_int(s: str) -> int {
+    // Simple string to int conversion
+    let result = 0;
+    let len = str::len(s);
+    let i = 0;
+    while i < len {
+        let c = str::char_at(s, i);
+        if c >= "0" && c <= "9" {
+            result = result * 10 + (str::char_code(c) - str::char_code("0"));
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn evaluate(expr: str) -> int {
+    // Parse "number operator number" format
+    let parts = str::split(expr, " ");
+
+    let a = parse_int(parts[0]);
+    let op = parts[1];
+    let b = parse_int(parts[2]);
+
+    if op == "+" {
+        return a + b;
+    } else if op == "-" {
+        return a - b;
+    } else if op == "*" {
+        return a * b;
+    } else if op == "/" {
+        return a / b;
+    }
+
+    return 0;
+}
+
+fn main() {
+    let expressions: str[] = ["2 + 3", "10 - 4", "6 * 7", "20 / 4", "quit"];
+
+    let i = 0;
+    while i < 5 {
+        let expr = expressions[i];
+        if expr == "quit" {
+            break;
+        }
+        print(evaluate(expr));
+        i = i + 1;
+    }
+}

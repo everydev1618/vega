@@ -1,0 +1,39 @@
+// Test 06: Array Operations
+// Sum all, sum evens, double all
+
+fn main() {
+    let arr: int[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+    // Sum all elements
+    let sum = 0;
+    let i = 0;
+    while i < 10 {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    print(sum);
+
+    // Sum even elements
+    let even_sum = 0;
+    i = 0;
+    while i < 10 {
+        if arr[i] % 2 == 0 {
+            even_sum = even_sum + arr[i];
+        }
+        i = i + 1;
+    }
+    print(even_sum);
+
+    // Double all elements and format as comma-separated
+    let doubled = "";
+    i = 0;
+    while i < 10 {
+        let val = arr[i] * 2;
+        if i > 0 {
+            doubled = doubled + ",";
+        }
+        doubled = doubled + str::from_int(val);
+        i = i + 1;
+    }
+    print(doubled);
+}

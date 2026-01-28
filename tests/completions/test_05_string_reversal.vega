@@ -1,0 +1,18 @@
+// Test 05: String Reversal
+// Reverse "Vega is stellar" and print
+
+fn reverse(s: str) -> str {
+    let result = "";
+    let len = str::len(s);
+    let i = len - 1;
+    while i >= 0 {
+        result = result + str::char_at(s, i);
+        i = i - 1;
+    }
+    return result;
+}
+
+fn main() {
+    let reversed = reverse("Vega is stellar");
+    print(reversed);
+}

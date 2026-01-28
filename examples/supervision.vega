@@ -1,0 +1,23 @@
+// Example: Supervised Agent Spawn
+// Demonstrates the supervision syntax for fault-tolerant agents
+
+agent Worker {
+    model "claude-sonnet-4-20250514"
+    system "You are a helpful worker agent. Be concise."
+}
+
+fn main() {
+    // Spawn a supervised worker agent
+    // If the worker fails, it will be restarted (up to 3 times in 60 seconds)
+    let worker = spawn Worker supervised by {
+        strategy restart
+        max_restarts 3
+        window 60000
+    };
+
+    print("Spawned supervised worker agent");
+
+    // In a real scenario, we'd send messages to the worker
+    // For now, just demonstrate the syntax compiles
+    print("Supervision test complete!");
+}

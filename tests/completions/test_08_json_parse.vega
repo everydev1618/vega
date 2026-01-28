@@ -1,0 +1,22 @@
+// Test 08: JSON Parse
+// Parse JSON and extract values
+
+fn main() {
+    let json_str = "{\"name\": \"Vega\", \"version\": 0.1, \"features\": [\"agents\", \"tools\", \"async\"]}";
+
+    // Parse and extract values
+    let name = json::get_string(json_str, "name");
+    print(name);
+
+    let version = json::get_float(json_str, "version");
+    print(version);
+
+    // Count features array items
+    let features = json::get_array(json_str, "features");
+    let count = json::array_len(features);
+    print(count);
+
+    // Get second feature (index 1)
+    let second = json::array_get(features, 1);
+    print(second);
+}

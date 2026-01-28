@@ -1,0 +1,19 @@
+// Test 15: Agent Conversation Loop
+// Agent maintains state and counts
+
+agent Counter {
+    model "claude-sonnet-4-20250514"
+    system "You are counting. Each time you receive a message, respond with the next number. Start at 1. Respond with only the number."
+    temperature 0.0
+}
+
+fn main() {
+    let counter = spawn Counter;
+
+    let i = 0;
+    while i < 5 {
+        let response = counter <- "next";
+        print(response);
+        i = i + 1;
+    }
+}

@@ -1,0 +1,18 @@
+// Test 12: Agent with Tool
+// Agent uses tool to perform calculation
+
+agent Calculator {
+    model "claude-sonnet-4-20250514"
+    system "You are a calculator. Use the add tool when asked to add numbers. Respond only with the numeric result."
+    temperature 0.0
+
+    tool add(a: int, b: int) -> int {
+        return a + b;
+    }
+}
+
+fn main() {
+    let calc = spawn Calculator;
+    let response = calc <- "What is 7 + 35?";
+    print(response);
+}

@@ -1,0 +1,15 @@
+// hello.vega - Minimal Vega example
+//
+// A simple program that spawns an agent and sends it a message.
+
+agent Greeter {
+    model "claude-sonnet-4-20250514"
+    system "You are a friendly assistant. Keep responses brief."
+    temperature 0.7
+}
+
+fn main() {
+    let greeter = spawn Greeter;
+    let response = greeter <- "Hello! What's your name?";
+    print(response);
+}

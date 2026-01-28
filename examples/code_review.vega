@@ -1,0 +1,53 @@
+// code_review.vega - Multi-agent code review example
+//
+// Demonstrates the Coder + Reviewer workflow from the spec.
+
+agent Coder {
+    model "claude-sonnet-4-20250514"
+    system "You write clean, efficient code. Respond only with code, no explanations."
+    temperature 0.3
+
+    tool read_file(path: str) -> str {
+        return file::read(path);
+    }
+
+    tool write_file(path: str, content: str) -> void {
+        file::write(path, content);
+    }
+}
+
+agent Reviewer {
+    model "claude-sonnet-4-20250514"
+    system "You review code for bugs, style issues, and best practices. If code is good, say 'APPROVED'. Otherwise list specific issues."
+    temperature 0.2
+}
+
+fn main() {
+    let coder = spawn Coder;
+    let reviewer = spawn Reviewer;
+
+    // Ask coder to write some code
+    let code = coder <- "Write a Python function to check if a number is prime";
+
+    print("=== Generated Code ===");
+    print(code);
+    print("");
+
+    // Have reviewer check it
+    let review = reviewer <- "Review this code:\n" + code;
+
+    print("=== Code Review ===");
+    print(review);
+    print("");
+
+    // Check if issues were found
+    if review.has("APPROVED") {
+        print("Code approved! No issues found.");
+    } else {
+        print("Issues found. Asking coder to fix...");
+        let fixed = coder <- "Fix these issues in your code:\n" + review;
+
+        print("=== Fixed Code ===");
+        print(fixed);
+    }
+}
