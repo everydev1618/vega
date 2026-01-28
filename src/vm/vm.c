@@ -348,6 +348,108 @@ static Value call_native(VegaVM* vm, const char* name, Value* args, uint32_t arg
         return value_bool(vega_string_contains(args[0].as.string, args[1].as.string));
     }
 
+    // str::char_at(s, index) -> str (single character)
+    if (strcmp(name, "str::char_at") == 0 && argc == 2) {
+        if (args[0].type != VAL_STRING || args[1].type != VAL_INT) {
+            return value_null();
+        }
+        VegaString* s = args[0].as.string;
+        int64_t idx = args[1].as.integer;
+        if (idx < 0 || (uint32_t)idx >= s->length) {
+            return value_string(vega_string_new("", 0));
+        }
+        char buf[2] = {s->data[idx], '\0'};
+        return value_string(vega_string_new(buf, 1));
+    }
+
+    // str::from_int(n) -> str
+    if (strcmp(name, "str::from_int") == 0 && argc == 1) {
+        if (args[0].type != VAL_INT) {
+            return value_string(vega_string_from_cstr(""));
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%lld", (long long)args[0].as.integer);
+        return value_string(vega_string_from_cstr(buf));
+    }
+
+    // str::split(s, delimiter) -> str[] (array of strings)
+    if (strcmp(name, "str::split") == 0 && argc == 2) {
+        if (args[0].type != VAL_STRING || args[1].type != VAL_STRING) {
+            return (Value){.type = VAL_ARRAY, .as.array = array_new(0)};
+        }
+        VegaString* s = args[0].as.string;
+        VegaString* delim = args[1].as.string;
+
+        VegaArray* result = array_new(8);
+
+        if (delim->length == 0) {
+            // Empty delimiter - return array with original string
+            array_push(result, value_string(s));
+            vega_obj_retain(s);
+            return (Value){.type = VAL_ARRAY, .as.array = result};
+        }
+
+        const char* start = s->data;
+        const char* end = s->data + s->length;
+        const char* pos;
+
+        while ((pos = strstr(start, delim->data)) != NULL && start < end) {
+            uint32_t len = pos - start;
+            VegaString* part = vega_string_new(start, len);
+            array_push(result, value_string(part));
+            start = pos + delim->length;
+        }
+
+        // Add remaining part
+        if (start <= end) {
+            uint32_t len = end - start;
+            VegaString* part = vega_string_new(start, len);
+            array_push(result, value_string(part));
+        }
+
+        return (Value){.type = VAL_ARRAY, .as.array = result};
+    }
+
+    // str::char_code(c) -> int (ASCII value of first char)
+    if (strcmp(name, "str::char_code") == 0 && argc == 1) {
+        if (args[0].type != VAL_STRING || args[0].as.string->length == 0) {
+            return value_int(0);
+        }
+        return value_int((unsigned char)args[0].as.string->data[0]);
+    }
+
+    // str::char_lower(c) -> str (lowercase single char)
+    if (strcmp(name, "str::char_lower") == 0 && argc == 1) {
+        if (args[0].type != VAL_STRING || args[0].as.string->length == 0) {
+            return value_string(vega_string_new("", 0));
+        }
+        char c = args[0].as.string->data[0];
+        if (c >= 'A' && c <= 'Z') {
+            c = c + ('a' - 'A');
+        }
+        char buf[2] = {c, '\0'};
+        return value_string(vega_string_new(buf, 1));
+    }
+
+    // str::split_len(s, delimiter) -> int (count of parts after split)
+    if (strcmp(name, "str::split_len") == 0 && argc == 2) {
+        if (args[0].type != VAL_STRING || args[1].type != VAL_STRING) {
+            return value_int(0);
+        }
+        VegaString* s = args[0].as.string;
+        VegaString* delim = args[1].as.string;
+
+        if (delim->length == 0) return value_int(1);
+
+        int count = 1;
+        const char* pos = s->data;
+        while ((pos = strstr(pos, delim->data)) != NULL) {
+            count++;
+            pos += delim->length;
+        }
+        return value_int(count);
+    }
+
     return value_null();
 }
 
@@ -686,11 +788,17 @@ bool vm_step(VegaVM* vm) {
             // We'll pop them
             if (strcmp(name_z, "file::read") == 0 ||
                 strcmp(name_z, "file::exists") == 0 ||
-                strcmp(name_z, "str::len") == 0) {
+                strcmp(name_z, "str::len") == 0 ||
+                strcmp(name_z, "str::from_int") == 0 ||
+                strcmp(name_z, "str::char_code") == 0 ||
+                strcmp(name_z, "str::char_lower") == 0) {
                 argc = 1;
                 args[0] = vm_pop(vm);
             } else if (strcmp(name_z, "file::write") == 0 ||
-                       strcmp(name_z, "str::contains") == 0) {
+                       strcmp(name_z, "str::contains") == 0 ||
+                       strcmp(name_z, "str::char_at") == 0 ||
+                       strcmp(name_z, "str::split") == 0 ||
+                       strcmp(name_z, "str::split_len") == 0) {
                 argc = 2;
                 args[1] = vm_pop(vm);
                 args[0] = vm_pop(vm);
@@ -856,6 +964,60 @@ bool vm_step(VegaVM* vm) {
             for (uint32_t i = 0; i < argc; i++) {
                 value_release(args[i]);
             }
+            break;
+        }
+
+        case OP_ARRAY_NEW: {
+            uint16_t capacity = READ_U16(vm->code, vm->ip);
+            vm->ip += 2;
+            VegaArray* arr = array_new(capacity > 0 ? capacity : 4);
+            vm_push(vm, (Value){.type = VAL_ARRAY, .as.array = arr});
+            break;
+        }
+
+        case OP_ARRAY_PUSH: {
+            Value elem = vm_pop(vm);
+            Value arr_val = vm_pop(vm);
+            if (arr_val.type == VAL_ARRAY && arr_val.as.array) {
+                array_push(arr_val.as.array, elem);
+            }
+            vm_push(vm, arr_val);  // Put array back on stack
+            break;
+        }
+
+        case OP_ARRAY_GET: {
+            Value idx = vm_pop(vm);
+            Value arr_val = vm_pop(vm);
+            if (arr_val.type == VAL_ARRAY && arr_val.as.array && idx.type == VAL_INT) {
+                Value result = array_get(arr_val.as.array, (uint32_t)idx.as.integer);
+                value_retain(result);
+                vm_push(vm, result);
+            } else {
+                vm_push(vm, value_null());
+            }
+            value_release(arr_val);
+            break;
+        }
+
+        case OP_ARRAY_SET: {
+            Value val = vm_pop(vm);
+            Value idx = vm_pop(vm);
+            Value arr_val = vm_pop(vm);
+            if (arr_val.type == VAL_ARRAY && arr_val.as.array && idx.type == VAL_INT) {
+                array_set(arr_val.as.array, (uint32_t)idx.as.integer, val);
+            }
+            value_release(arr_val);
+            break;
+        }
+
+        case OP_ARRAY_LEN: {
+            Value arr_val = vm_pop(vm);
+            if (arr_val.type == VAL_ARRAY && arr_val.as.array) {
+                vm_push(vm, value_int(array_length(arr_val.as.array)));
+            } else {
+                vm_push(vm, value_int(0));
+            }
+            value_release(arr_val);
             break;
         }
 

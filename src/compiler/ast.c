@@ -189,6 +189,26 @@ AstExpr* ast_await(AstExpr* future, SourceLoc loc) {
     return expr;
 }
 
+AstExpr* ast_array_literal(AstExpr** elements, uint32_t count, SourceLoc loc) {
+    AstExpr* expr = malloc(sizeof(AstExpr));
+    if (!expr) return NULL;
+    expr->kind = EXPR_ARRAY_LITERAL;
+    expr->loc = loc;
+    expr->as.array_literal.elements = elements;
+    expr->as.array_literal.count = count;
+    return expr;
+}
+
+AstExpr* ast_index(AstExpr* object, AstExpr* index, SourceLoc loc) {
+    AstExpr* expr = malloc(sizeof(AstExpr));
+    if (!expr) return NULL;
+    expr->kind = EXPR_INDEX;
+    expr->loc = loc;
+    expr->as.index.object = object;
+    expr->as.index.index = index;
+    return expr;
+}
+
 // ============================================================================
 // Statement Constructors
 // ============================================================================
@@ -329,6 +349,12 @@ void ast_expr_free(AstExpr* expr) {
     switch (expr->kind) {
         case EXPR_STRING_LITERAL:
             free(expr->as.string_val.value);
+            break;
+        case EXPR_ARRAY_LITERAL:
+            for (uint32_t i = 0; i < expr->as.array_literal.count; i++) {
+                ast_expr_free(expr->as.array_literal.elements[i]);
+            }
+            free(expr->as.array_literal.elements);
             break;
         case EXPR_IDENTIFIER:
             free(expr->as.ident.name);

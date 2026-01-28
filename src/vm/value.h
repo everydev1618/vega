@@ -57,8 +57,8 @@ typedef struct {
 // Array Type
 // ============================================================================
 
+// Note: VegaObjHeader is prepended by vega_obj_alloc, not part of this struct
 struct VegaArray {
-    VegaObjHeader header;
     Value* items;
     uint32_t count;
     uint32_t capacity;
@@ -68,8 +68,8 @@ struct VegaArray {
 // Result Type (for error handling)
 // ============================================================================
 
+// Note: VegaObjHeader is prepended by vega_obj_alloc, not part of this struct
 struct VegaResult {
-    VegaObjHeader header;
     bool is_ok;
     Value value;        // Success value or error
 };

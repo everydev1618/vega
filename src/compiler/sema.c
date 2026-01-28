@@ -123,6 +123,10 @@ const char* type_name(VegaType type) {
 bool types_equal(TypeInfo* a, TypeInfo* b) {
     if (a->kind != b->kind) return false;
     if (a->kind == TYPE_ARRAY) {
+        // Allow unknown element type to match any array
+        if (a->element_type == TYPE_UNKNOWN || b->element_type == TYPE_UNKNOWN) {
+            return true;
+        }
         return a->element_type == b->element_type;
     }
     if (a->kind == TYPE_AGENT) {
@@ -176,6 +180,13 @@ static TypeInfo analyze_binary(SemanticAnalyzer* sema, AstExpr* expr) {
 
     switch (expr->as.binary.op) {
         case BINOP_ADD:
+            // Array concatenation
+            if (left.kind == TYPE_ARRAY && right.kind == TYPE_ARRAY) {
+                // Use the element type from the left operand, or right if left is unknown
+                VegaType elem_type = left.element_type != TYPE_UNKNOWN ?
+                    left.element_type : right.element_type;
+                return (TypeInfo){.kind = TYPE_ARRAY, .element_type = elem_type};
+            }
             // String concatenation
             if (left.kind == TYPE_STRING || right.kind == TYPE_STRING) {
                 return (TypeInfo){.kind = TYPE_STRING};
@@ -410,6 +421,38 @@ static TypeInfo analyze_expr(SemanticAnalyzer* sema, AstExpr* expr) {
                 sema_error(sema, expr->loc, "Can only await futures");
             }
             return (TypeInfo){.kind = TYPE_STRING};
+        }
+
+        case EXPR_ARRAY_LITERAL: {
+            // Analyze all elements and infer element type from first
+            TypeInfo elem_type = {.kind = TYPE_UNKNOWN};
+            for (uint32_t i = 0; i < expr->as.array_literal.count; i++) {
+                TypeInfo t = analyze_expr(sema, expr->as.array_literal.elements[i]);
+                if (i == 0) {
+                    elem_type = t;
+                }
+            }
+            return (TypeInfo){.kind = TYPE_ARRAY, .element_type = elem_type.kind};
+        }
+
+        case EXPR_INDEX: {
+            TypeInfo obj = analyze_expr(sema, expr->as.index.object);
+            TypeInfo idx = analyze_expr(sema, expr->as.index.index);
+
+            if (idx.kind != TYPE_INT && idx.kind != TYPE_UNKNOWN) {
+                sema_error(sema, expr->as.index.index->loc,
+                          "Array index must be int, got %s", type_name(idx.kind));
+            }
+
+            if (obj.kind == TYPE_ARRAY) {
+                // Return the element type
+                return (TypeInfo){.kind = obj.element_type};
+            }
+            if (obj.kind == TYPE_STRING) {
+                // String indexing returns string (single char)
+                return (TypeInfo){.kind = TYPE_STRING};
+            }
+            return (TypeInfo){.kind = TYPE_UNKNOWN};
         }
 
         default:

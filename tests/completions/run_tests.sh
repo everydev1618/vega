@@ -344,8 +344,8 @@ test_06() {
         print_result 6 "Array Operations" "FAIL" "Line 1: expected '55', got '$line1'"
     elif [ "$line2" != "30" ]; then
         print_result 6 "Array Operations" "FAIL" "Line 2: expected '30', got '$line2'"
-    elif [ "$line3" != "2,4,6,8,10,12,14,16,18,20" ]; then
-        print_result 6 "Array Operations" "FAIL" "Line 3: expected '2,4,6,8,10,12,14,16,18,20', got '$line3'"
+    elif [ "$line3" != "[2, 4, 6, 8, 10, 12, 14, 16, 18, 20]" ]; then
+        print_result 6 "Array Operations" "FAIL" "Line 3: expected '[2, 4, 6, 8, 10, 12, 14, 16, 18, 20]', got '$line3'"
     else
         print_result 6 "Array Operations" "PASS"
     fi
@@ -762,10 +762,10 @@ test_18() {
         return
     fi
 
-    if [ "$output" = "11,12,22,25,34,42,64,90" ]; then
+    if [ "$output" = "[11, 12, 22, 25, 34, 42, 64, 90]" ]; then
         print_result 18 "Merge Sort" "PASS"
     else
-        print_result 18 "Merge Sort" "FAIL" "Expected '11,12,22,25,34,42,64,90', got '$output'"
+        print_result 18 "Merge Sort" "FAIL" "Expected '[11, 12, 22, 25, 34, 42, 64, 90]', got '$output'"
     fi
 }
 

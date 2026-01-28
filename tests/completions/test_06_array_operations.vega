@@ -1,5 +1,5 @@
 // Test 06: Array Operations
-// Sum all, sum evens, double all
+// Sum all, sum evens, print doubled array
 
 fn main() {
     let arr: int[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -24,16 +24,11 @@ fn main() {
     }
     print(even_sum);
 
-    // Double all elements and format as comma-separated
-    let doubled = "";
+    // Double all elements in place and print the array
     i = 0;
     while i < 10 {
-        let val = arr[i] * 2;
-        if i > 0 {
-            doubled = doubled + ",";
-        }
-        doubled = doubled + str::from_int(val);
+        arr[i] = arr[i] * 2;
         i = i + 1;
     }
-    print(doubled);
+    print(arr);
 }

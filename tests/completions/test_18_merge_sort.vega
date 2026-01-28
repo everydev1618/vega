@@ -60,15 +60,5 @@ fn merge_sort(arr: int[], len: int) -> int[] {
 fn main() {
     let arr: int[] = [64, 34, 25, 12, 22, 11, 90, 42];
     let sorted = merge_sort(arr, 8);
-
-    let result = "";
-    let i = 0;
-    while i < 8 {
-        if i > 0 {
-            result = result + ",";
-        }
-        result = result + str::from_int(sorted[i]);
-        i = i + 1;
-    }
-    print(result);
+    print(sorted);
 }

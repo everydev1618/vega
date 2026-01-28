@@ -75,6 +75,13 @@ typedef enum {
     OP_STR_CONCAT   = 0x80,  // Concatenate strings: a, b -> str
     OP_STR_HAS      = 0x81,  // String contains: str, substr -> bool
 
+    // Array Operations (0xA0 - 0xAF)
+    OP_ARRAY_NEW    = 0xA0,  // Create new array with capacity: [cap:u16] -> array
+    OP_ARRAY_PUSH   = 0xA1,  // Push value to array: array, value -> array
+    OP_ARRAY_GET    = 0xA2,  // Get element: array, index -> value
+    OP_ARRAY_SET    = 0xA3,  // Set element: array, index, value -> void
+    OP_ARRAY_LEN    = 0xA4,  // Get array length: array -> int
+
     // Process/Supervision (0x90 - 0x9F)
     OP_SPAWN_PROCESS     = 0x90,  // Spawn new process: [agent_id:u16] -> pid
     OP_EXIT_PROCESS      = 0x91,  // Exit current process: [reason:u8]

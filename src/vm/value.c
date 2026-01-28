@@ -75,6 +75,27 @@ int value_compare(Value a, Value b) {
 // ============================================================================
 
 Value value_add(Value a, Value b) {
+    // Array concatenation
+    if (a.type == VAL_ARRAY && b.type == VAL_ARRAY) {
+        VegaArray* arr_a = a.as.array;
+        VegaArray* arr_b = b.as.array;
+        uint32_t total = (arr_a ? arr_a->count : 0) + (arr_b ? arr_b->count : 0);
+        VegaArray* result = array_new(total > 0 ? total : 4);
+
+        if (arr_a) {
+            for (uint32_t i = 0; i < arr_a->count; i++) {
+                array_push(result, arr_a->items[i]);
+            }
+        }
+        if (arr_b) {
+            for (uint32_t i = 0; i < arr_b->count; i++) {
+                array_push(result, arr_b->items[i]);
+            }
+        }
+
+        return (Value){.type = VAL_ARRAY, .as.array = result};
+    }
+
     // String concatenation
     if (a.type == VAL_STRING || b.type == VAL_STRING) {
         VegaString* sa = value_to_string(a);
@@ -121,15 +142,17 @@ Value value_mul(Value a, Value b) {
 }
 
 Value value_div(Value a, Value b) {
+    // Integer division returns integer (truncates toward zero)
+    if (a.type == VAL_INT && b.type == VAL_INT) {
+        if (b.as.integer == 0) return value_null();
+        return value_int(a.as.integer / b.as.integer);
+    }
+
+    // Float division
     double db = value_as_number(b);
     if (db == 0.0) {
         return value_null();  // Division by zero
     }
-
-    if (a.type == VAL_INT && b.type == VAL_INT && a.as.integer % b.as.integer == 0) {
-        return value_int(a.as.integer / b.as.integer);
-    }
-
     return value_float(value_as_number(a) / db);
 }
 
@@ -276,7 +299,16 @@ void value_print(Value v) {
             printf("<future>");
             break;
         case VAL_ARRAY:
-            printf("<array>");
+            if (v.as.array) {
+                printf("[");
+                for (uint32_t i = 0; i < v.as.array->count; i++) {
+                    if (i > 0) printf(", ");
+                    value_print(v.as.array->items[i]);
+                }
+                printf("]");
+            } else {
+                printf("[]");
+            }
             break;
         case VAL_RESULT:
             printf("<result>");
@@ -311,7 +343,7 @@ const char* value_type_name(ValueType type) {
 // ============================================================================
 
 VegaArray* array_new(uint32_t initial_capacity) {
-    VegaArray* arr = vega_obj_alloc(sizeof(VegaArray) - sizeof(VegaObjHeader), OBJ_ARRAY);
+    VegaArray* arr = vega_obj_alloc(sizeof(VegaArray), OBJ_ARRAY);
     if (!arr) return NULL;
 
     arr->capacity = initial_capacity > 0 ? initial_capacity : 8;
@@ -357,7 +389,7 @@ uint32_t array_length(VegaArray* arr) {
 // ============================================================================
 
 VegaResult* result_ok(Value value) {
-    VegaResult* r = vega_obj_alloc(sizeof(VegaResult) - sizeof(VegaObjHeader), OBJ_RESULT);
+    VegaResult* r = vega_obj_alloc(sizeof(VegaResult), OBJ_RESULT);
     if (!r) return NULL;
 
     r->is_ok = true;
@@ -368,7 +400,7 @@ VegaResult* result_ok(Value value) {
 }
 
 VegaResult* result_err(Value error) {
-    VegaResult* r = vega_obj_alloc(sizeof(VegaResult) - sizeof(VegaObjHeader), OBJ_RESULT);
+    VegaResult* r = vega_obj_alloc(sizeof(VegaResult), OBJ_RESULT);
     if (!r) return NULL;
 
     r->is_ok = false;

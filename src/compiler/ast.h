@@ -27,6 +27,7 @@ typedef enum {
     EXPR_STRING_LITERAL,
     EXPR_BOOL_LITERAL,
     EXPR_NULL_LITERAL,
+    EXPR_ARRAY_LITERAL,
     EXPR_IDENTIFIER,
     EXPR_BINARY,
     EXPR_UNARY,
@@ -88,6 +89,12 @@ struct AstExpr {
             uint32_t length;
         } string_val;
         bool bool_val;
+
+        // Array literal: [expr, expr, ...]
+        struct {
+            AstExpr** elements;
+            uint32_t count;
+        } array_literal;
 
         // Identifier
         struct {
@@ -316,6 +323,8 @@ AstExpr* ast_float_literal(double value, SourceLoc loc);
 AstExpr* ast_string_literal(const char* value, uint32_t length, SourceLoc loc);
 AstExpr* ast_bool_literal(bool value, SourceLoc loc);
 AstExpr* ast_null_literal(SourceLoc loc);
+AstExpr* ast_array_literal(AstExpr** elements, uint32_t count, SourceLoc loc);
+AstExpr* ast_index(AstExpr* object, AstExpr* index, SourceLoc loc);
 AstExpr* ast_identifier(const char* name, SourceLoc loc);
 AstExpr* ast_binary(BinaryOp op, AstExpr* left, AstExpr* right, SourceLoc loc);
 AstExpr* ast_unary(UnaryOp op, AstExpr* operand, SourceLoc loc);

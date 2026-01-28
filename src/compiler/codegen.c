@@ -340,6 +340,24 @@ static void emit_expr(CodeGen* cg, AstExpr* expr) {
             emit_byte(cg, OP_AWAIT);
             break;
 
+        case EXPR_ARRAY_LITERAL: {
+            // Create new array with initial capacity
+            emit_byte(cg, OP_ARRAY_NEW);
+            emit_u16(cg, (uint16_t)expr->as.array_literal.count);
+            // Push each element
+            for (uint32_t i = 0; i < expr->as.array_literal.count; i++) {
+                emit_expr(cg, expr->as.array_literal.elements[i]);
+                emit_byte(cg, OP_ARRAY_PUSH);
+            }
+            break;
+        }
+
+        case EXPR_INDEX:
+            emit_expr(cg, expr->as.index.object);
+            emit_expr(cg, expr->as.index.index);
+            emit_byte(cg, OP_ARRAY_GET);
+            break;
+
         default:
             break;
     }
@@ -381,8 +399,8 @@ static void emit_stmt(CodeGen* cg, AstStmt* stmt) {
         }
 
         case STMT_ASSIGN: {
-            emit_expr(cg, stmt->as.assign.value);
             if (stmt->as.assign.target->kind == EXPR_IDENTIFIER) {
+                emit_expr(cg, stmt->as.assign.value);
                 int slot = find_local(cg, stmt->as.assign.target->as.ident.name);
                 if (slot >= 0) {
                     emit_byte(cg, OP_STORE_LOCAL);
@@ -394,6 +412,12 @@ static void emit_stmt(CodeGen* cg, AstStmt* stmt) {
                     emit_byte(cg, OP_STORE_GLOBAL);
                     emit_u16(cg, idx);
                 }
+            } else if (stmt->as.assign.target->kind == EXPR_INDEX) {
+                // Array index assignment: arr[idx] = value
+                emit_expr(cg, stmt->as.assign.target->as.index.object);
+                emit_expr(cg, stmt->as.assign.target->as.index.index);
+                emit_expr(cg, stmt->as.assign.value);
+                emit_byte(cg, OP_ARRAY_SET);
             }
             break;
         }

@@ -267,6 +267,28 @@ static AstExpr* parse_await(Parser* parser) {
     return ast_await(future, loc);
 }
 
+// Array literal: [expr, expr, ...]
+static AstExpr* parse_array_literal(Parser* parser) {
+    SourceLoc loc = parser->previous.loc;
+
+    AstExpr** elements = NULL;
+    uint32_t count = 0;
+    uint32_t capacity = 0;
+
+    if (!check(parser, TOK_RBRACKET)) {
+        do {
+            if (count >= capacity) {
+                capacity = capacity == 0 ? 4 : capacity * 2;
+                elements = realloc(elements, capacity * sizeof(AstExpr*));
+            }
+            elements[count++] = parse_expression(parser);
+        } while (match(parser, TOK_COMMA));
+    }
+
+    consume(parser, TOK_RBRACKET, "Expected ']' after array elements");
+    return ast_array_literal(elements, count, loc);
+}
+
 // Infix/binary expressions
 static BinaryOp token_to_binop(TokenType type) {
     switch (type) {
@@ -369,6 +391,14 @@ static AstExpr* parse_dot(Parser* parser, AstExpr* left) {
     return ast_field_access(left, name, loc);
 }
 
+// Index expression: arr[idx]
+static AstExpr* parse_index(Parser* parser, AstExpr* left) {
+    SourceLoc loc = parser->previous.loc;
+    AstExpr* index = parse_expression(parser);
+    consume(parser, TOK_RBRACKET, "Expected ']' after index");
+    return ast_index(left, index, loc);
+}
+
 // Module call: module::function(args)
 static AstExpr* parse_module_call(Parser* parser, AstExpr* module_ident) {
     // We've just consumed ::
@@ -425,6 +455,7 @@ static AstExpr* parse_prefix(Parser* parser) {
         case TOK_FALSE:    return parse_false(parser);
         case TOK_NULL:     return parse_null(parser);
         case TOK_LPAREN:   return parse_grouping(parser);
+        case TOK_LBRACKET: return parse_array_literal(parser);
         case TOK_MINUS:
         case TOK_NOT:      return parse_unary(parser);
         case TOK_SPAWN:    return parse_spawn(parser);
@@ -453,6 +484,7 @@ static Precedence get_infix_precedence(TokenType type) {
         case TOK_SLASH:
         case TOK_PERCENT:  return PREC_FACTOR;
         case TOK_LPAREN:
+        case TOK_LBRACKET:
         case TOK_DOT:
         case TOK_COLONCOLON: return PREC_CALL;
         default:           return PREC_NONE;
@@ -476,6 +508,7 @@ static AstExpr* parse_infix(Parser* parser, AstExpr* left) {
         case TOK_AND:
         case TOK_OR:         return parse_binary(parser, left);
         case TOK_LPAREN:     return parse_call(parser, left);
+        case TOK_LBRACKET:   return parse_index(parser, left);
         case TOK_DOT:        return parse_dot(parser, left);
         case TOK_COLONCOLON: return parse_module_call(parser, left);
         default:
