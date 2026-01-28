@@ -46,8 +46,9 @@ Vega's runtime handles all of that:
 # Build
 make
 
-# Set your API key
-export ANTHROPIC_API_KEY=sk-...
+# Set your API key (one of these options)
+echo 'ANTHROPIC_API_KEY=sk-...' >> ~/.vega   # Option 1: config file (recommended)
+export ANTHROPIC_API_KEY=sk-...              # Option 2: environment variable
 
 # Compile and run
 ./bin/vegac examples/hello.vega -o hello.vgb
@@ -169,6 +170,77 @@ fn main() {
 }
 ```
 
+### Imports
+
+Vega supports importing code from other files:
+
+```vega
+import "math";              // Import from stdlib
+import "string";            // Import from stdlib
+import "./helpers";         // Relative import (same directory)
+import "../utils/common";   // Relative import (parent directory)
+
+fn main() {
+    print(max(10, 20));      // From math
+    print(repeat("*", 5));   // From string
+}
+```
+
+**Search path resolution:**
+1. Relative paths (`./foo`, `../bar`) resolve from the current file
+2. Other paths resolve from `./stdlib/` in the working directory
+3. Set `VEGA_PATH` environment variable for custom locations
+
+## Standard Library
+
+Vega includes a standard library in the `stdlib/` directory.
+
+### math
+
+```vega
+import "math";
+
+max(a: int, b: int) -> int      // Larger of two values
+min(a: int, b: int) -> int      // Smaller of two values
+abs(n: int) -> int              // Absolute value
+clamp(val, lo, hi: int) -> int  // Constrain to range
+sign(n: int) -> int             // -1, 0, or 1
+```
+
+### string
+
+```vega
+import "string";
+
+len(s: str) -> int                        // String length
+contains(s: str, substr: str) -> bool     // Check substring
+char_at(s: str, index: int) -> str        // Get character
+repeat(s: str, n: int) -> str             // Repeat string
+pad_left(s: str, width: int, pad: str)    // Left pad
+pad_right(s: str, width: int, pad: str)   // Right pad
+```
+
+### Native Functions
+
+These are built into the VM and always available (no import needed):
+
+```vega
+// File I/O
+file::read(path: str) -> str
+file::write(path: str, content: str)
+file::exists(path: str) -> bool
+file::list(dir: str) -> str
+
+// String utilities
+str::len(s: str) -> int
+str::contains(s: str, substr: str) -> bool
+str::char_at(s: str, index: int) -> str
+str::split(s: str, delim: str) -> str[]
+
+// Output
+print(value)   // Print any value
+```
+
 ## Project Structure
 
 ```
@@ -176,9 +248,23 @@ src/
   compiler/    # Lexer, parser, semantic analysis, code generation
   vm/          # Bytecode interpreter, agent runtime, scheduler
   common/      # Shared utilities (memory management, bytecode spec)
-  stdlib/      # Standard library (file I/O, strings, JSON)
+stdlib/        # Standard library (math, string, etc.)
 examples/      # Example programs
 docs/          # Language specification and design docs
+```
+
+## Configuration
+
+Vega looks for your Anthropic API key in two places (in order):
+
+1. **Environment variable**: `ANTHROPIC_API_KEY`
+2. **Config file**: `~/.vega`
+
+The config file uses simple `key=value` format:
+
+```bash
+# ~/.vega
+ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
 ## Building
@@ -202,6 +288,7 @@ The core language is functional:
 - Agent runtime (spawn, message passing, tool execution)
 - Supervision (process model, restart strategies)
 - Anthropic API integration
+- Import system and standard library
 
 See [docs/TODO.md](docs/TODO.md) for the roadmap.
 

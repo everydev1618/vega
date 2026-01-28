@@ -31,6 +31,9 @@ bool http_init(void);
 // Cleanup HTTP client (call once at shutdown)
 void http_cleanup(void);
 
+// Simple HTTP GET request
+HttpResponse* http_get(const char* url);
+
 // Send a message to the Anthropic API
 // Returns allocated response that must be freed with http_response_free
 HttpResponse* anthropic_send_message(
@@ -86,13 +89,28 @@ bool anthropic_has_tool_use(const char* json_response);
 // Returns tool name (allocated), sets tool_id and input_json
 char* anthropic_extract_tool_use(const char* json_response, char** tool_id, char** input_json);
 
-// Send tool result back to continue conversation
+// Send tool result back to continue conversation (original)
 HttpResponse* anthropic_send_tool_result(
     const char* api_key,
     const char* model,
     const char* system_prompt,
     const char** messages,
     int message_count,
+    const char* tool_use_id,
+    const char* tool_result,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+);
+
+// Send tool result with proper assistant content (for multi-turn tool use)
+HttpResponse* anthropic_send_tool_result_v2(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    const char* assistant_content,
     const char* tool_use_id,
     const char* tool_result,
     ToolDefinition* tools,

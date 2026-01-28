@@ -34,6 +34,8 @@ static const Keyword keywords[] = {
     {"for",         TOK_FOR},
     {"break",       TOK_BREAK},
     {"continue",    TOK_CONTINUE},
+    {"import",      TOK_IMPORT},
+    {"as",          TOK_AS},
     // Supervision keywords
     {"supervised",  TOK_SUPERVISED},
     {"by",          TOK_BY},
@@ -44,6 +46,10 @@ static const Keyword keywords[] = {
     {"restart_all", TOK_RESTART_ALL},
     {"max_restarts", TOK_MAX_RESTARTS},
     {"window",      TOK_WINDOW},
+    // Result/match keywords
+    {"match",       TOK_MATCH},
+    {"Ok",          TOK_OK},
+    {"Err",         TOK_ERR},
     {NULL,          TOK_EOF}
 };
 
@@ -308,6 +314,7 @@ Token lexer_next_token(Lexer* lexer) {
 
         case '=':
             if (match(lexer, '=')) return make_token(lexer, TOK_EQEQ);
+            if (match(lexer, '>')) return make_token(lexer, TOK_FATARROW);
             return make_token(lexer, TOK_EQ);
 
         case '!':
@@ -390,6 +397,8 @@ const char* token_type_name(TokenType type) {
         case TOK_FOR:         return "FOR";
         case TOK_BREAK:       return "BREAK";
         case TOK_CONTINUE:    return "CONTINUE";
+        case TOK_IMPORT:      return "IMPORT";
+        case TOK_AS:          return "AS";
         case TOK_SUPERVISED:  return "SUPERVISED";
         case TOK_BY:          return "BY";
         case TOK_STRATEGY:    return "STRATEGY";

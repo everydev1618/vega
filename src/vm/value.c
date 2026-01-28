@@ -423,3 +423,13 @@ Value result_unwrap_err(VegaResult* r) {
     if (!r || r->is_ok) return value_null();
     return r->value;
 }
+
+Value value_result_ok(Value value) {
+    VegaResult* r = result_ok(value);
+    return (Value){.type = VAL_RESULT, .as.result = r};
+}
+
+Value value_result_err(Value error) {
+    VegaResult* r = result_err(error);
+    return (Value){.type = VAL_RESULT, .as.result = r};
+}

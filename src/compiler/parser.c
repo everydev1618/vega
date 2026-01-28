@@ -240,6 +240,8 @@ static AstSupervisionConfig* parse_supervision_config(Parser* parser) {
 
 static AstExpr* parse_spawn(Parser* parser) {
     SourceLoc loc = parser->previous.loc;
+
+    // Check for async before agent name: spawn async Worker
     bool is_async = match(parser, TOK_ASYNC);
 
     if (!consume(parser, TOK_IDENT, "Expected agent name after 'spawn'")) {
@@ -247,6 +249,11 @@ static AstExpr* parse_spawn(Parser* parser) {
     }
 
     char* name = copy_token_string(&parser->previous);
+
+    // Also check for async after agent name: spawn Worker async
+    if (!is_async) {
+        is_async = match(parser, TOK_ASYNC);
+    }
 
     // Check for supervision
     if (match(parser, TOK_SUPERVISED)) {
@@ -265,6 +272,69 @@ static AstExpr* parse_await(Parser* parser) {
     SourceLoc loc = parser->previous.loc;
     AstExpr* future = parse_expression(parser);
     return ast_await(future, loc);
+}
+
+static AstExpr* parse_ok(Parser* parser) {
+    SourceLoc loc = parser->previous.loc;
+    consume(parser, TOK_LPAREN, "Expected '(' after 'Ok'");
+    AstExpr* value = parse_expression(parser);
+    consume(parser, TOK_RPAREN, "Expected ')' after Ok value");
+    return ast_ok(value, loc);
+}
+
+static AstExpr* parse_err(Parser* parser) {
+    SourceLoc loc = parser->previous.loc;
+    consume(parser, TOK_LPAREN, "Expected '(' after 'Err'");
+    AstExpr* value = parse_expression(parser);
+    consume(parser, TOK_RPAREN, "Expected ')' after Err value");
+    return ast_err(value, loc);
+}
+
+static AstExpr* parse_match(Parser* parser) {
+    SourceLoc loc = parser->previous.loc;
+
+    AstExpr* scrutinee = parse_expression(parser);
+    consume(parser, TOK_LBRACE, "Expected '{' after match expression");
+
+    MatchArm* arms = NULL;
+    uint32_t arm_count = 0;
+    uint32_t arm_capacity = 0;
+
+    while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
+        MatchArm arm = {0};
+
+        // Parse Ok(x) or Err(x)
+        if (match(parser, TOK_OK)) {
+            arm.is_ok = true;
+        } else if (match(parser, TOK_ERR)) {
+            arm.is_ok = false;
+        } else {
+            error(parser, "Expected 'Ok' or 'Err' in match arm");
+            break;
+        }
+
+        consume(parser, TOK_LPAREN, "Expected '(' after Ok/Err");
+        consume(parser, TOK_IDENT, "Expected variable name in pattern");
+        arm.binding_name = copy_token_string(&parser->previous);
+        consume(parser, TOK_RPAREN, "Expected ')' after pattern variable");
+
+        consume(parser, TOK_FATARROW, "Expected '=>' after pattern");
+
+        arm.body = parse_expression(parser);
+
+        // Add arm to array
+        if (arm_count >= arm_capacity) {
+            arm_capacity = arm_capacity == 0 ? 2 : arm_capacity * 2;
+            arms = realloc(arms, arm_capacity * sizeof(MatchArm));
+        }
+        arms[arm_count++] = arm;
+
+        // Optional comma between arms
+        match(parser, TOK_COMMA);
+    }
+
+    consume(parser, TOK_RBRACE, "Expected '}' after match arms");
+    return ast_match(scrutinee, arms, arm_count, loc);
 }
 
 // Array literal: [expr, expr, ...]
@@ -460,6 +530,9 @@ static AstExpr* parse_prefix(Parser* parser) {
         case TOK_NOT:      return parse_unary(parser);
         case TOK_SPAWN:    return parse_spawn(parser);
         case TOK_AWAIT:    return parse_await(parser);
+        case TOK_OK:       return parse_ok(parser);
+        case TOK_ERR:      return parse_err(parser);
+        case TOK_MATCH:    return parse_match(parser);
         default:
             error(parser, "Expected expression, got %s",
                   token_type_name(parser->previous.type));
@@ -751,6 +824,12 @@ static AstStmt* parse_statement(Parser* parser) {
         return parse_block(parser);
     }
 
+    // Match statements don't need trailing semicolon
+    if (match(parser, TOK_MATCH)) {
+        AstExpr* match_expr = parse_match(parser);
+        return ast_expr_stmt(match_expr, match_expr->loc);
+    }
+
     return parse_expression_statement(parser);
 }
 
@@ -760,9 +839,36 @@ static AstStmt* parse_statement(Parser* parser) {
 
 static TypeAnnotation parse_type(Parser* parser) {
     TypeAnnotation type = {0};
+
+    // Check for Result type
+    if (check(parser, TOK_IDENT) &&
+        parser->current.value.str.length == 6 &&
+        strncmp(parser->current.value.str.start, "Result", 6) == 0) {
+        advance(parser);
+        type.name = strdup("Result");
+        type.is_result = true;
+
+        // Parse Result<T, E>
+        if (match(parser, TOK_LT)) {
+            type.ok_type = malloc(sizeof(TypeAnnotation));
+            *type.ok_type = parse_type(parser);
+
+            consume(parser, TOK_COMMA, "Expected ',' in Result<T, E>");
+
+            type.err_type = malloc(sizeof(TypeAnnotation));
+            *type.err_type = parse_type(parser);
+
+            consume(parser, TOK_GT, "Expected '>' after Result<T, E>");
+        }
+        return type;
+    }
+
     consume(parser, TOK_IDENT, "Expected type name");
     type.name = copy_token_string(&parser->previous);
     type.is_array = match(parser, TOK_LBRACKET) && match(parser, TOK_RBRACKET);
+    type.is_result = false;
+    type.ok_type = NULL;
+    type.err_type = NULL;
     return type;
 }
 
@@ -914,7 +1020,43 @@ static AstDecl* parse_agent(Parser* parser) {
     return decl;
 }
 
+// Parse: import "path" [as alias];
+static AstDecl* parse_import(Parser* parser) {
+    SourceLoc loc = parser->previous.loc;
+
+    // Expect string path
+    if (!consume(parser, TOK_STRING, "Expected module path after 'import'")) {
+        return NULL;
+    }
+
+    // Extract path string (lexer already strips quotes)
+    char* path = strndup(parser->previous.value.str.start,
+                         parser->previous.value.str.length);
+
+    // Optional: as alias
+    char* alias = NULL;
+    if (match(parser, TOK_AS)) {
+        if (!consume(parser, TOK_IDENT, "Expected alias name after 'as'")) {
+            free(path);
+            return NULL;
+        }
+        alias = strndup(parser->previous.value.str.start,
+                        parser->previous.value.str.length);
+    }
+
+    if (!consume(parser, TOK_SEMICOLON, "Expected ';' after import")) {
+        free(path);
+        free(alias);
+        return NULL;
+    }
+
+    return ast_import(path, alias, loc);
+}
+
 static AstDecl* parse_declaration(Parser* parser) {
+    if (match(parser, TOK_IMPORT)) {
+        return parse_import(parser);
+    }
     if (match(parser, TOK_AGENT)) {
         return parse_agent(parser);
     }
@@ -922,7 +1064,7 @@ static AstDecl* parse_declaration(Parser* parser) {
         return parse_function(parser);
     }
 
-    error(parser, "Expected 'agent' or 'fn' at top level, got %s",
+    error(parser, "Expected 'import', 'agent', or 'fn' at top level, got %s",
           token_type_name(parser->current.type));
     return NULL;
 }

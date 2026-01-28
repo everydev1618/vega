@@ -76,8 +76,8 @@ typedef struct VegaVM {
     bool had_error;
     char error_msg[256];
 
-    // API key (from environment)
-    const char* api_key;
+    // API key (from environment or ~/.vega config)
+    char* api_key;
 
     // Process model (Phase 2)
     VegaProcess* processes[MAX_PROCESSES];
@@ -120,6 +120,7 @@ Value vm_peek(VegaVM* vm, uint32_t distance);
 // Constant pool access
 Value vm_read_constant(VegaVM* vm, uint16_t index);
 const char* vm_read_string(VegaVM* vm, uint16_t index, uint32_t* out_len);
+const char* vm_find_string_after_key(VegaVM* vm, const char* key, uint32_t* out_len);
 
 // Global variable access
 Value vm_get_global(VegaVM* vm, const char* name);

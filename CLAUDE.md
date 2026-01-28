@@ -11,7 +11,7 @@ make
 # Compile a program
 ./bin/vegac program.vega -o program.vgb
 
-# Run it (requires ANTHROPIC_API_KEY environment variable)
+# Run it (requires API key in ~/.vega or ANTHROPIC_API_KEY env var)
 ./bin/vega program.vgb
 
 # Or use make shortcut

@@ -1,0 +1,11 @@
+# Build outputs
+bin/
+*.vgb
+
+# Test artifacts
+test_output.txt
+tests/completions/build/
+
+# Common ignores
+.DS_Store
+*.o

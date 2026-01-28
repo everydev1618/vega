@@ -46,6 +46,8 @@ typedef enum {
     TOK_FOR,            // for
     TOK_BREAK,          // break
     TOK_CONTINUE,       // continue
+    TOK_IMPORT,         // import
+    TOK_AS,             // as
 
     // Supervision keywords
     TOK_SUPERVISED,     // supervised
@@ -57,6 +59,11 @@ typedef enum {
     TOK_RESTART_ALL,    // restart_all
     TOK_MAX_RESTARTS,   // max_restarts
     TOK_WINDOW,         // window
+
+    // Result/match keywords
+    TOK_MATCH,          // match
+    TOK_OK,             // Ok
+    TOK_ERR,            // Err
 
     // Operators
     TOK_PLUS,           // +
@@ -76,6 +83,7 @@ typedef enum {
     TOK_NOT,            // !
     TOK_ARROW,          // ->
     TOK_MSG,            // <-
+    TOK_FATARROW,       // =>
     TOK_DOT,            // .
     TOK_COLON,          // :
     TOK_COLONCOLON,     // ::

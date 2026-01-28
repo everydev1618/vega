@@ -10,8 +10,9 @@
 // JSON Parsing Helpers
 // ============================================================================
 
-// Extract a string value from JSON by key
-static char* json_get_string(const char* json, const char* key) {
+// Extract any JSON value by key (works with strings, numbers, bools)
+// Returns the raw value as a string, and sets *is_string if it was quoted
+static char* json_get_value(const char* json, const char* key, bool* is_string) {
     char search[256];
     snprintf(search, sizeof(search), "\"%s\":", key);
 
@@ -21,16 +22,26 @@ static char* json_get_string(const char* json, const char* key) {
     pos += strlen(search);
     while (*pos == ' ' || *pos == '\t' || *pos == '\n') pos++;
 
-    if (*pos != '"') return NULL;
-    pos++;
-
-    const char* end = pos;
-    while (*end && *end != '"') {
-        if (*end == '\\' && *(end + 1)) end += 2;
-        else end++;
+    if (*pos == '"') {
+        // Quoted string
+        if (is_string) *is_string = true;
+        pos++;
+        const char* end = pos;
+        while (*end && *end != '"') {
+            if (*end == '\\' && *(end + 1)) end += 2;
+            else end++;
+        }
+        return strndup(pos, end - pos);
+    } else {
+        // Unquoted value (number, bool, null)
+        if (is_string) *is_string = false;
+        const char* end = pos;
+        while (*end && *end != ',' && *end != '}' && *end != ']' &&
+               *end != ' ' && *end != '\t' && *end != '\n') {
+            end++;
+        }
+        return strndup(pos, end - pos);
     }
-
-    return strndup(pos, end - pos);
 }
 
 // ============================================================================
@@ -91,15 +102,56 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
                 tool->function_id = i;
                 tool->param_count = vm->functions[i].param_count;
 
-                // Create param names (we don't have them stored, use generic names)
+                // Look for param info in constant pool: "AgentName$toolname$params" -> "name:type,..."
                 if (tool->param_count > 0) {
                     tool->param_names = malloc(tool->param_count * sizeof(char*));
                     tool->param_types = malloc(tool->param_count * sizeof(char*));
-                    for (int p = 0; p < tool->param_count; p++) {
-                        char pname[32];
-                        snprintf(pname, sizeof(pname), "arg%d", p);
-                        tool->param_names[p] = strdup(pname);
-                        tool->param_types[p] = strdup("str");  // Default to string
+
+                    // Build the params key
+                    char params_key[280];
+                    snprintf(params_key, sizeof(params_key), "%.*s$params", (int)fn_len, fn_name);
+
+                    uint32_t params_len;
+                    const char* params_str = vm_find_string_after_key(vm, params_key, &params_len);
+
+                    if (params_str && params_len > 0) {
+                        // Parse "name1:type1,name2:type2"
+                        char* params_copy = strndup(params_str, params_len);
+                        char* saveptr = NULL;
+                        char* token = strtok_r(params_copy, ",", &saveptr);
+                        int p = 0;
+
+                        while (token && p < tool->param_count) {
+                            char* colon = strchr(token, ':');
+                            if (colon) {
+                                *colon = '\0';
+                                tool->param_names[p] = strdup(token);
+                                tool->param_types[p] = strdup(colon + 1);
+                            } else {
+                                tool->param_names[p] = strdup(token);
+                                tool->param_types[p] = strdup("str");
+                            }
+                            token = strtok_r(NULL, ",", &saveptr);
+                            p++;
+                        }
+                        free(params_copy);
+
+                        // Fill remaining with defaults if needed
+                        while (p < tool->param_count) {
+                            char pname[32];
+                            snprintf(pname, sizeof(pname), "arg%d", p);
+                            tool->param_names[p] = strdup(pname);
+                            tool->param_types[p] = strdup("str");
+                            p++;
+                        }
+                    } else {
+                        // Fall back to generic names
+                        for (int p = 0; p < tool->param_count; p++) {
+                            char pname[32];
+                            snprintf(pname, sizeof(pname), "arg%d", p);
+                            tool->param_names[p] = strdup(pname);
+                            tool->param_types[p] = strdup("str");
+                        }
                     }
                 } else {
                     tool->param_names = NULL;
@@ -225,17 +277,37 @@ static char* execute_tool(VegaVM* vm, VegaAgent* agent, const char* tool_name, c
     uint32_t saved_frame_count = vm->frame_count;
 
     // Push arguments from JSON
-    // Parse input_json to extract arguments
+    // Parse input_json to extract arguments, inferring types from JSON values
     for (int p = 0; p < tool->param_count; p++) {
-        char* arg_val = json_get_string(input_json, tool->param_names[p]);
-        if (arg_val) {
+        bool is_string = false;
+        char* arg_val = json_get_value(input_json, tool->param_names[p], &is_string);
+
+        if (!arg_val) {
+            // No value found, push null
+            vm_push(vm, value_null());
+            continue;
+        }
+
+        if (is_string) {
+            // Quoted string in JSON -> push as string
             VegaString* str = vega_string_from_cstr(arg_val);
             vm_push(vm, value_string(str));
-            free(arg_val);
+        } else if (strcmp(arg_val, "true") == 0) {
+            vm_push(vm, value_bool(true));
+        } else if (strcmp(arg_val, "false") == 0) {
+            vm_push(vm, value_bool(false));
+        } else if (strcmp(arg_val, "null") == 0) {
+            vm_push(vm, value_null());
+        } else if (strchr(arg_val, '.') != NULL) {
+            // Has decimal point -> float
+            double float_val = strtod(arg_val, NULL);
+            vm_push(vm, value_float(float_val));
         } else {
-            // Push empty string for missing args
-            vm_push(vm, value_string(vega_string_from_cstr("")));
+            // Assume integer
+            int64_t int_val = strtoll(arg_val, NULL, 10);
+            vm_push(vm, value_int(int_val));
         }
+        free(arg_val);
     }
 
     // Set up call frame
@@ -381,20 +453,47 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
                 // Execute the tool
                 char* tool_result = execute_tool(vm, agent, tool_name, tool_input);
 
-                // Send tool result back
+                // Extract content array from assistant response for proper API formatting
+                char* assistant_content = NULL;
+                const char* content_start = strstr(resp->body, "\"content\":");
+                if (content_start) {
+                    content_start += 10;
+                    while (*content_start == ' ' || *content_start == '\t' || *content_start == '\n') content_start++;
+                    if (*content_start == '[') {
+                        const char* content_end = content_start + 1;
+                        int depth = 1;
+                        while (*content_end && depth > 0) {
+                            if (*content_end == '[') depth++;
+                            else if (*content_end == ']') depth--;
+                            else if (*content_end == '"') {
+                                content_end++;
+                                while (*content_end && *content_end != '"') {
+                                    if (*content_end == '\\') content_end++;
+                                    content_end++;
+                                }
+                            }
+                            content_end++;
+                        }
+                        assistant_content = strndup(content_start, content_end - content_start);
+                    }
+                }
+
+                // Send tool result back with assistant content
                 http_response_free(resp);
-                resp = anthropic_send_tool_result(
+                resp = anthropic_send_tool_result_v2(
                     vm->api_key,
                     agent->model,
                     agent->system_prompt,
                     (const char**)agent->messages,
                     (int)agent->message_count,
+                    assistant_content,
                     tool_id,
                     tool_result,
                     tool_defs,
                     (int)agent->tool_count,
                     agent->temperature
                 );
+                free(assistant_content);
 
                 free(tool_id);
                 free(tool_name);

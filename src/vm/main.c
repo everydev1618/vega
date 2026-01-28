@@ -31,6 +31,9 @@ static void print_usage(const char* prog) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Environment:\n");
     fprintf(stderr, "  ANTHROPIC_API_KEY  Required for agent operations\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Config:\n");
+    fprintf(stderr, "  ~/.vega            Config file (ANTHROPIC_API_KEY=sk-...)\n");
 }
 
 /*
@@ -46,7 +49,7 @@ static const char* CLAUDE_MD_CONTENT =
 "\n"
 "```bash\n"
 "vegac program.vega -o program.vgb   # Compile\n"
-"vega program.vgb                     # Run (needs ANTHROPIC_API_KEY)\n"
+"vega program.vgb                     # Run (needs ~/.vega or ANTHROPIC_API_KEY)\n"
 "```\n"
 "\n"
 "## Syntax Cheatsheet\n"
@@ -225,7 +228,7 @@ static int cmd_init(int argc, char* argv[]) {
     if (project_name) {
         printf("  cd %s\n", project_name);
     }
-    printf("  export ANTHROPIC_API_KEY=your-key-here\n");
+    printf("  echo 'ANTHROPIC_API_KEY=your-key-here' >> ~/.vega\n");
     printf("  vegac hello.vega -o hello.vgb\n");
     printf("  vega hello.vgb\n");
 
@@ -267,11 +270,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Check for API key
-    const char* api_key = getenv("ANTHROPIC_API_KEY");
-    if (!api_key) {
-        fprintf(stderr, "Warning: ANTHROPIC_API_KEY not set. Agent operations will fail.\n");
-    }
+    // Note: API key check happens in vm_init() which checks both
+    // environment variable and ~/.vega config file
 
     // Initialize subsystems
     vega_memory_init();

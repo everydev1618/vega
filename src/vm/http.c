@@ -196,6 +196,42 @@ void http_response_free(HttpResponse* resp) {
 }
 
 // ============================================================================
+// General HTTP GET
+// ============================================================================
+
+HttpResponse* http_get(const char* url) {
+    HttpResponse* resp = calloc(1, sizeof(HttpResponse));
+    if (!resp) return NULL;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        resp->error = strdup("Failed to initialize CURL");
+        return resp;
+    }
+
+    ResponseBuffer response_buf = {0};
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    if (res != CURLE_OK) {
+        resp->error = strdup(curl_easy_strerror(res));
+    } else {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
+        resp->body = response_buf.data;
+        resp->body_len = response_buf.size;
+    }
+
+    curl_easy_cleanup(curl);
+    return resp;
+}
+
+// ============================================================================
 // JSON Parsing (minimal, just for extracting text)
 // ============================================================================
 
@@ -657,6 +693,147 @@ HttpResponse* anthropic_send_tool_result(
     // Set up CURL
     ResponseBuffer response_buf = {0};
 
+    struct curl_slist* headers = NULL;
+    char auth_header[256];
+    snprintf(auth_header, sizeof(auth_header), "x-api-key: %s", api_key ? api_key : "");
+    headers = curl_slist_append(headers, auth_header);
+    headers = curl_slist_append(headers, "content-type: application/json");
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    if (res != CURLE_OK) {
+        resp->error = strdup(curl_easy_strerror(res));
+    } else {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
+        resp->body = response_buf.data;
+        resp->body_len = response_buf.size;
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    free(body);
+
+    return resp;
+}
+
+HttpResponse* anthropic_send_tool_result_v2(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    const char* assistant_content,
+    const char* tool_use_id,
+    const char* tool_result,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+) {
+    HttpResponse* resp = calloc(1, sizeof(HttpResponse));
+    if (!resp) return NULL;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        resp->error = strdup("Failed to initialize CURL");
+        return resp;
+    }
+
+    size_t body_capacity = 16384;
+    char* body = malloc(body_capacity);
+
+    char* escaped_model = json_escape_string(model ? model : "claude-sonnet-4-20250514");
+    char* escaped_system = json_escape_string(system_prompt ? system_prompt : "You are a helpful assistant.");
+
+    int offset = snprintf(body, body_capacity,
+        "{\"model\": \"%s\",\"max_tokens\": 4096,\"temperature\": %.2f,\"system\": \"%s\",\"messages\": [",
+        escaped_model, temperature, escaped_system
+    );
+
+    free(escaped_model);
+    free(escaped_system);
+
+    for (int i = 0; i < message_count; i++) {
+        const char* role = (i % 2 == 0) ? "user" : "assistant";
+        char* escaped_content = json_escape_string(messages[i]);
+        size_t needed = strlen(escaped_content) + 100;
+        if (offset + needed >= body_capacity) {
+            body_capacity = body_capacity * 2 + needed;
+            body = realloc(body, body_capacity);
+        }
+        offset += snprintf(body + offset, body_capacity - offset,
+            "%s{\"role\": \"%s\", \"content\": \"%s\"}",
+            i > 0 ? "," : "", role, escaped_content);
+        free(escaped_content);
+    }
+
+    if (assistant_content) {
+        size_t needed = strlen(assistant_content) + 100;
+        if (offset + needed >= body_capacity) {
+            body_capacity = body_capacity * 2 + needed;
+            body = realloc(body, body_capacity);
+        }
+        offset += snprintf(body + offset, body_capacity - offset,
+            ",{\"role\": \"assistant\", \"content\": %s}", assistant_content);
+    }
+
+    char* escaped_result = json_escape_string(tool_result);
+    size_t needed = strlen(escaped_result) + strlen(tool_use_id) + 200;
+    if (offset + needed >= body_capacity) {
+        body_capacity = body_capacity * 2 + needed;
+        body = realloc(body, body_capacity);
+    }
+    offset += snprintf(body + offset, body_capacity - offset,
+        ",{\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"%s\", \"content\": \"%s\"}]}]",
+        tool_use_id, escaped_result);
+    free(escaped_result);
+
+    if (tool_count > 0 && tools) {
+        offset += snprintf(body + offset, body_capacity - offset, ",\"tools\": [");
+        for (int t = 0; t < tool_count; t++) {
+            if (offset + 1024 >= (int)body_capacity) {
+                body_capacity *= 2;
+                body = realloc(body, body_capacity);
+            }
+            char* escaped_name = json_escape_string(tools[t].name);
+            char* escaped_desc = json_escape_string(tools[t].description ? tools[t].description : "");
+            offset += snprintf(body + offset, body_capacity - offset,
+                "%s{\"name\": \"%s\", \"description\": \"%s\", \"input_schema\": {\"type\": \"object\", \"properties\": {",
+                t > 0 ? "," : "", escaped_name, escaped_desc);
+            free(escaped_name);
+            free(escaped_desc);
+
+            for (int p = 0; p < tools[t].param_count; p++) {
+                const char* ptype = "string";
+                if (tools[t].param_types && tools[t].param_types[p]) {
+                    if (strcmp(tools[t].param_types[p], "int") == 0) ptype = "integer";
+                    else if (strcmp(tools[t].param_types[p], "bool") == 0) ptype = "boolean";
+                    else if (strcmp(tools[t].param_types[p], "float") == 0) ptype = "number";
+                }
+                offset += snprintf(body + offset, body_capacity - offset,
+                    "%s\"%s\": {\"type\": \"%s\"}", p > 0 ? "," : "", tools[t].param_names[p], ptype);
+            }
+
+            offset += snprintf(body + offset, body_capacity - offset, "}, \"required\": [");
+            for (int p = 0; p < tools[t].param_count; p++) {
+                offset += snprintf(body + offset, body_capacity - offset,
+                    "%s\"%s\"", p > 0 ? "," : "", tools[t].param_names[p]);
+            }
+            offset += snprintf(body + offset, body_capacity - offset, "]}}");
+        }
+        offset += snprintf(body + offset, body_capacity - offset, "]");
+    }
+
+    snprintf(body + offset, body_capacity - offset, "}");
+
+    ResponseBuffer response_buf = {0};
     struct curl_slist* headers = NULL;
     char auth_header[256];
     snprintf(auth_header, sizeof(auth_header), "x-api-key: %s", api_key ? api_key : "");

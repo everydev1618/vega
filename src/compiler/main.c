@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <libgen.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "lexer.h"
 #include "parser.h"
@@ -167,7 +170,58 @@ int main(int argc, char* argv[]) {
     SemanticAnalyzer sema;
     sema_init(&sema);
 
-    if (!sema_analyze(&sema, program)) {
+    // Set up import search paths
+    // 1. Current working directory's stdlib
+    struct stat st;
+    if (stat("stdlib", &st) == 0 && S_ISDIR(st.st_mode)) {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd))) {
+            char stdlib_path[1100];
+            snprintf(stdlib_path, sizeof(stdlib_path), "%s/stdlib", cwd);
+            sema_add_search_path(&sema, stdlib_path);
+        }
+    }
+
+    // 2. VEGA_PATH environment variable
+    const char* vega_path = getenv("VEGA_PATH");
+    if (vega_path) {
+        sema_add_search_path(&sema, vega_path);
+    }
+
+    if (!sema_analyze(&sema, program, input_file)) {
+        sema_cleanup(&sema);
+        free(source);
+        ast_program_free(program);
+        vega_memory_shutdown();
+        return 1;
+    }
+
+    // Code generation
+    if (verbose) fprintf(stderr, "[4/4] Generating bytecode...\n");
+    CodeGen codegen;
+    codegen_init(&codegen);
+
+    // Generate code for imported modules first
+    AstProgram* modules[64];
+    uint32_t module_count = sema_get_module_programs(&sema, modules, 64);
+    for (uint32_t i = 0; i < module_count; i++) {
+        if (!codegen_generate(&codegen, modules[i])) {
+            fprintf(stderr, "Error: Code generation failed for imported module: %s\n",
+                    codegen_error_msg(&codegen));
+            codegen_cleanup(&codegen);
+            sema_cleanup(&sema);
+            free(source);
+            ast_program_free(program);
+            vega_memory_shutdown();
+            return 1;
+        }
+    }
+
+    // Generate code for main program
+    if (!codegen_generate(&codegen, program)) {
+        fprintf(stderr, "Error: Code generation failed: %s\n",
+                codegen_error_msg(&codegen));
+        codegen_cleanup(&codegen);
         sema_cleanup(&sema);
         free(source);
         ast_program_free(program);
@@ -176,21 +230,6 @@ int main(int argc, char* argv[]) {
     }
 
     sema_cleanup(&sema);
-
-    // Code generation
-    if (verbose) fprintf(stderr, "[4/4] Generating bytecode...\n");
-    CodeGen codegen;
-    codegen_init(&codegen);
-
-    if (!codegen_generate(&codegen, program)) {
-        fprintf(stderr, "Error: Code generation failed: %s\n",
-                codegen_error_msg(&codegen));
-        codegen_cleanup(&codegen);
-        free(source);
-        ast_program_free(program);
-        vega_memory_shutdown();
-        return 1;
-    }
 
     // Output
     if (disassemble) {

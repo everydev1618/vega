@@ -82,6 +82,12 @@ typedef enum {
     OP_ARRAY_SET    = 0xA3,  // Set element: array, index, value -> void
     OP_ARRAY_LEN    = 0xA4,  // Get array length: array -> int
 
+    // Result Operations (0xB0 - 0xBF)
+    OP_RESULT_OK    = 0xB0,  // Wrap value in Ok: value -> Result
+    OP_RESULT_ERR   = 0xB1,  // Wrap value in Err: value -> Result
+    OP_RESULT_IS_OK = 0xB2,  // Check if Result is Ok: result -> bool
+    OP_RESULT_UNWRAP = 0xB3, // Unwrap Result value: result -> value
+
     // Process/Supervision (0x90 - 0x9F)
     OP_SPAWN_PROCESS     = 0x90,  // Spawn new process: [agent_id:u16] -> pid
     OP_EXIT_PROCESS      = 0x91,  // Exit current process: [reason:u8]

@@ -77,6 +77,30 @@ typedef struct Scope {
 // Semantic Analyzer State
 // ============================================================================
 
+// ============================================================================
+// Module System
+// ============================================================================
+
+typedef struct Module {
+    char* path;                 // Canonical file path
+    char* source;               // Source code (owned)
+    AstProgram* ast;            // Parsed AST
+    bool analyzing;             // Currently being analyzed (for circular detection)
+    bool analyzed;              // Analysis complete
+    struct Module* next;        // Hash chain
+} Module;
+
+typedef struct {
+    Module** modules;           // Hash table
+    uint32_t capacity;
+    char* search_paths[8];      // Where to look for imports
+    uint32_t search_path_count;
+} ModuleCache;
+
+// ============================================================================
+// Semantic Analyzer State
+// ============================================================================
+
 typedef struct {
     Scope* global_scope;
     Scope* current_scope;
@@ -90,6 +114,10 @@ typedef struct {
     AstDecl* current_function;  // Current function being analyzed
     AstDecl* current_agent;     // Current agent being analyzed
     bool in_loop;               // For break/continue validation
+
+    // Module system
+    ModuleCache modules;
+    const char* current_file;   // File currently being analyzed
 } SemanticAnalyzer;
 
 // ============================================================================
@@ -100,8 +128,15 @@ typedef struct {
 void sema_init(SemanticAnalyzer* sema);
 void sema_cleanup(SemanticAnalyzer* sema);
 
-// Analyze program
-bool sema_analyze(SemanticAnalyzer* sema, AstProgram* program);
+// Analyze program (source_path needed for relative import resolution)
+bool sema_analyze(SemanticAnalyzer* sema, AstProgram* program, const char* source_path);
+
+// Add a search path for imports (e.g., stdlib directory)
+void sema_add_search_path(SemanticAnalyzer* sema, const char* path);
+
+// Get all module ASTs for code generation (call after sema_analyze)
+// Returns number of modules, fills programs array (caller provides array)
+uint32_t sema_get_module_programs(SemanticAnalyzer* sema, AstProgram** programs, uint32_t max_count);
 
 // Error reporting
 bool sema_had_error(SemanticAnalyzer* sema);

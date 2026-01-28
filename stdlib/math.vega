@@ -1,0 +1,42 @@
+// Vega standard library: math functions
+
+fn max(a: int, b: int) -> int {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn min(a: int, b: int) -> int {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn abs(n: int) -> int {
+    if n < 0 {
+        return 0 - n;
+    }
+    return n;
+}
+
+fn clamp(val: int, lo: int, hi: int) -> int {
+    if val < lo {
+        return lo;
+    }
+    if val > hi {
+        return hi;
+    }
+    return val;
+}
+
+fn sign(n: int) -> int {
+    if n < 0 {
+        return 0 - 1;
+    }
+    if n > 0 {
+        return 1;
+    }
+    return 0;
+}

@@ -1,8 +1,13 @@
 #include "sema.h"
+#include "parser.h"
+#include "lexer.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <limits.h>
 
 // ============================================================================
 // Hash Function
@@ -81,6 +86,248 @@ static Symbol* scope_lookup(Scope* scope, const char* name) {
     return NULL;
 }
 
+// Forward declarations
+static void sema_error(SemanticAnalyzer* sema, SourceLoc loc, const char* fmt, ...);
+TypeInfo type_from_annotation(TypeAnnotation* annotation);  // Declared in header
+
+// ============================================================================
+// Module Cache
+// ============================================================================
+
+static void module_cache_init(ModuleCache* cache) {
+    cache->capacity = 64;
+    cache->modules = calloc(cache->capacity, sizeof(Module*));
+    cache->search_path_count = 0;
+}
+
+static void module_cache_free(ModuleCache* cache) {
+    for (uint32_t i = 0; i < cache->capacity; i++) {
+        Module* mod = cache->modules[i];
+        while (mod) {
+            Module* next = mod->next;
+            free(mod->path);
+            free(mod->source);
+            if (mod->ast) ast_program_free(mod->ast);
+            free(mod);
+            mod = next;
+        }
+    }
+    free(cache->modules);
+    for (uint32_t i = 0; i < cache->search_path_count; i++) {
+        free(cache->search_paths[i]);
+    }
+}
+
+static Module* module_cache_get(ModuleCache* cache, const char* path) {
+    uint32_t idx = hash_string(path) % cache->capacity;
+    Module* mod = cache->modules[idx];
+    while (mod) {
+        if (strcmp(mod->path, path) == 0) return mod;
+        mod = mod->next;
+    }
+    return NULL;
+}
+
+static void module_cache_add(ModuleCache* cache, Module* mod) {
+    uint32_t idx = hash_string(mod->path) % cache->capacity;
+    mod->next = cache->modules[idx];
+    cache->modules[idx] = mod;
+}
+
+// ============================================================================
+// Path Resolution
+// ============================================================================
+
+static bool file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static char* read_file_contents(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char* content = malloc(size + 1);
+    if (!content) {
+        fclose(f);
+        return NULL;
+    }
+
+    size_t read = fread(content, 1, size, f);
+    content[read] = '\0';
+    fclose(f);
+    return content;
+}
+
+// Resolve import path to actual file path
+// Returns allocated string or NULL if not found
+static char* resolve_import_path(SemanticAnalyzer* sema, const char* import_path) {
+    char resolved[PATH_MAX];
+    char* result = NULL;
+
+    // Relative import: "./foo" or "../foo"
+    if (import_path[0] == '.') {
+        // Get directory of current file
+        char* current_copy = strdup(sema->current_file);
+        char* dir = dirname(current_copy);
+
+        snprintf(resolved, sizeof(resolved), "%s/%s.vega", dir, import_path);
+        free(current_copy);
+
+        if (file_exists(resolved)) {
+            result = realpath(resolved, NULL);
+            if (result) return result;
+        }
+    }
+
+    // Search in search paths (stdlib, etc.)
+    for (uint32_t i = 0; i < sema->modules.search_path_count; i++) {
+        snprintf(resolved, sizeof(resolved), "%s/%s.vega",
+                 sema->modules.search_paths[i], import_path);
+        if (file_exists(resolved)) {
+            result = realpath(resolved, NULL);
+            if (result) return result;
+        }
+    }
+
+    return NULL;
+}
+
+// Forward declaration
+static bool process_module(SemanticAnalyzer* sema, const char* path);
+
+// Process a single import declaration
+static bool process_import(SemanticAnalyzer* sema, ImportDecl* import, SourceLoc loc) {
+    // Resolve the import path
+    char* resolved = resolve_import_path(sema, import->path);
+    if (!resolved) {
+        sema_error(sema, loc, "Cannot find module '%s'", import->path);
+        return false;
+    }
+
+    // Check if already in cache
+    Module* mod = module_cache_get(&sema->modules, resolved);
+    if (mod) {
+        if (mod->analyzing) {
+            sema_error(sema, loc, "Circular import detected: %s", import->path);
+            free(resolved);
+            return false;
+        }
+        // Already loaded, symbols are already in global scope
+        free(resolved);
+        return true;
+    }
+
+    // Load and process the module
+    if (!process_module(sema, resolved)) {
+        free(resolved);
+        return false;
+    }
+
+    free(resolved);
+    return true;
+}
+
+// Load, parse, and analyze a module
+static bool process_module(SemanticAnalyzer* sema, const char* path) {
+    // Read source
+    char* source = read_file_contents(path);
+    if (!source) {
+        fprintf(stderr, "Error: Cannot read module '%s'\n", path);
+        return false;
+    }
+
+    // Create module entry
+    Module* mod = malloc(sizeof(Module));
+    mod->path = strdup(path);
+    mod->source = source;
+    mod->ast = NULL;
+    mod->analyzing = true;
+    mod->analyzed = false;
+    mod->next = NULL;
+    module_cache_add(&sema->modules, mod);
+
+    // Parse
+    Lexer lexer;
+    lexer_init(&lexer, source, path);
+
+    Parser parser;
+    parser_init(&parser, &lexer);
+
+    AstProgram* ast = parser_parse_program(&parser);
+    if (parser_had_error(&parser)) {
+        mod->analyzing = false;
+        return false;
+    }
+    mod->ast = ast;
+
+    // Save current file context
+    const char* saved_file = sema->current_file;
+    sema->current_file = path;
+
+    // Process imports in this module first
+    for (uint32_t i = 0; i < ast->decl_count; i++) {
+        if (ast->decls[i]->kind == DECL_IMPORT) {
+            if (!process_import(sema, &ast->decls[i]->as.import, ast->decls[i]->loc)) {
+                sema->current_file = saved_file;
+                mod->analyzing = false;
+                return false;
+            }
+        }
+    }
+
+    // Register declarations from this module into global scope
+    for (uint32_t i = 0; i < ast->decl_count; i++) {
+        AstDecl* decl = ast->decls[i];
+
+        if (decl->kind == DECL_AGENT) {
+            Symbol* sym = malloc(sizeof(Symbol));
+            sym->name = strdup(decl->as.agent.name);
+            sym->kind = SYM_AGENT;
+            sym->type = (TypeInfo){.kind = TYPE_AGENT,
+                                   .agent_name = strdup(decl->as.agent.name)};
+            sym->defined_at = decl->loc;
+            sym->tool_count = decl->as.agent.tool_count;
+            sym->tool_names = malloc(sym->tool_count * sizeof(char*));
+            for (uint32_t j = 0; j < sym->tool_count; j++) {
+                sym->tool_names[j] = strdup(decl->as.agent.tools[j].name);
+            }
+            sym->param_types = NULL;
+            sym->param_count = 0;
+            sym->next = NULL;
+            scope_add(sema->global_scope, sym);
+        }
+        else if (decl->kind == DECL_FUNCTION) {
+            Symbol* sym = malloc(sizeof(Symbol));
+            sym->name = strdup(decl->as.function.name);
+            sym->kind = SYM_FUNCTION;
+            sym->type = (TypeInfo){.kind = TYPE_VOID};
+            sym->return_type = type_from_annotation(&decl->as.function.return_type);
+            sym->param_count = decl->as.function.param_count;
+            sym->param_types = malloc(sym->param_count * sizeof(TypeInfo));
+            for (uint32_t j = 0; j < sym->param_count; j++) {
+                sym->param_types[j] = type_from_annotation(&decl->as.function.params[j].type);
+            }
+            sym->defined_at = decl->loc;
+            sym->tool_names = NULL;
+            sym->tool_count = 0;
+            sym->next = NULL;
+            scope_add(sema->global_scope, sym);
+        }
+    }
+
+    // Restore context
+    sema->current_file = saved_file;
+    mod->analyzing = false;
+    mod->analyzed = true;
+
+    return true;
+}
+
 // ============================================================================
 // Error Reporting
 // ============================================================================
@@ -154,6 +401,8 @@ TypeInfo type_from_annotation(TypeAnnotation* annotation) {
         info.kind = TYPE_STRING;
     } else if (strcmp(annotation->name, "void") == 0) {
         info.kind = TYPE_VOID;
+    } else if (strcmp(annotation->name, "Result") == 0 || annotation->is_result) {
+        info.kind = TYPE_RESULT;
     } else {
         // Could be an agent type
         info.kind = TYPE_AGENT;
@@ -317,8 +566,23 @@ static TypeInfo analyze_expr(SemanticAnalyzer* sema, AstExpr* expr) {
                     }
                     if (strncmp(name, "str::", 5) == 0) {
                         if (strstr(name, "len")) return (TypeInfo){.kind = TYPE_INT};
+                        if (strstr(name, "char_code")) return (TypeInfo){.kind = TYPE_INT};
+                        if (strstr(name, "split_len")) return (TypeInfo){.kind = TYPE_INT};
                         if (strstr(name, "contains")) return (TypeInfo){.kind = TYPE_BOOL};
+                        if (strstr(name, "split")) return (TypeInfo){.kind = TYPE_ARRAY, .element_type = TYPE_STRING};
                         return (TypeInfo){.kind = TYPE_STRING};
+                    }
+                    if (strncmp(name, "json::", 6) == 0) {
+                        if (strstr(name, "get_string")) return (TypeInfo){.kind = TYPE_STRING};
+                        if (strstr(name, "get_float")) return (TypeInfo){.kind = TYPE_FLOAT};
+                        if (strstr(name, "get_int")) return (TypeInfo){.kind = TYPE_INT};
+                        if (strstr(name, "get_array")) return (TypeInfo){.kind = TYPE_STRING};  // JSON array as string
+                        if (strstr(name, "array_len")) return (TypeInfo){.kind = TYPE_INT};
+                        if (strstr(name, "array_get")) return (TypeInfo){.kind = TYPE_STRING};
+                        return (TypeInfo){.kind = TYPE_STRING};
+                    }
+                    if (strncmp(name, "http::", 6) == 0) {
+                        return (TypeInfo){.kind = TYPE_STRING};  // HTTP functions return strings
                     }
                     return (TypeInfo){.kind = TYPE_UNKNOWN};
                 }
@@ -396,10 +660,8 @@ static TypeInfo analyze_expr(SemanticAnalyzer* sema, AstExpr* expr) {
                 return (TypeInfo){.kind = TYPE_UNKNOWN};
             }
 
-            if (expr->as.spawn.is_async) {
-                return (TypeInfo){.kind = TYPE_FUTURE,
-                                  .agent_name = strdup(expr->as.spawn.agent_name)};
-            }
+            // Both sync and async spawn return agent handles
+            // (async just affects how message sends behave at runtime)
             return (TypeInfo){.kind = TYPE_AGENT,
                               .agent_name = strdup(expr->as.spawn.agent_name)};
         }
@@ -417,8 +679,9 @@ static TypeInfo analyze_expr(SemanticAnalyzer* sema, AstExpr* expr) {
 
         case EXPR_AWAIT: {
             TypeInfo future = analyze_expr(sema, expr->as.await.future);
-            if (future.kind != TYPE_FUTURE) {
-                sema_error(sema, expr->loc, "Can only await futures");
+            // Accept both futures and strings (strings are already-resolved values)
+            if (future.kind != TYPE_FUTURE && future.kind != TYPE_STRING) {
+                sema_error(sema, expr->loc, "Can only await futures or strings");
             }
             return (TypeInfo){.kind = TYPE_STRING};
         }
@@ -453,6 +716,46 @@ static TypeInfo analyze_expr(SemanticAnalyzer* sema, AstExpr* expr) {
                 return (TypeInfo){.kind = TYPE_STRING};
             }
             return (TypeInfo){.kind = TYPE_UNKNOWN};
+        }
+
+        case EXPR_OK: {
+            analyze_expr(sema, expr->as.result_val.value);
+            return (TypeInfo){.kind = TYPE_RESULT};
+        }
+
+        case EXPR_ERR: {
+            analyze_expr(sema, expr->as.result_val.value);
+            return (TypeInfo){.kind = TYPE_RESULT};
+        }
+
+        case EXPR_MATCH: {
+            analyze_expr(sema, expr->as.match.scrutinee);
+            // Analyze each arm's body expression with the binding in scope
+            for (uint32_t i = 0; i < expr->as.match.arm_count; i++) {
+                // Create a scope for the arm binding
+                Scope* arm_scope = scope_new(sema->current_scope);
+                sema->current_scope = arm_scope;
+
+                // Add the binding variable to scope
+                if (expr->as.match.arms[i].binding_name) {
+                    Symbol* binding = calloc(1, sizeof(Symbol));
+                    binding->name = strdup(expr->as.match.arms[i].binding_name);
+                    // Type is unknown (could be the unwrapped Ok or Err value)
+                    binding->type = (TypeInfo){.kind = TYPE_UNKNOWN};
+                    binding->kind = SYM_VARIABLE;
+                    scope_add(arm_scope, binding);
+                }
+
+                if (expr->as.match.arms[i].body) {
+                    analyze_expr(sema, expr->as.match.arms[i].body);
+                }
+
+                // Pop the arm scope
+                sema->current_scope = arm_scope->parent;
+                scope_free(arm_scope);
+            }
+            // Match expressions return void when used as statements
+            return (TypeInfo){.kind = TYPE_VOID};
         }
 
         default:
@@ -760,16 +1063,37 @@ void sema_init(SemanticAnalyzer* sema) {
     sema->current_function = NULL;
     sema->current_agent = NULL;
     sema->in_loop = false;
+    sema->current_file = NULL;
+    module_cache_init(&sema->modules);
 }
 
 void sema_cleanup(SemanticAnalyzer* sema) {
     scope_free(sema->global_scope);
     sema->global_scope = NULL;
     sema->current_scope = NULL;
+    module_cache_free(&sema->modules);
 }
 
-bool sema_analyze(SemanticAnalyzer* sema, AstProgram* program) {
-    // Register all declarations first (allows forward references)
+void sema_add_search_path(SemanticAnalyzer* sema, const char* path) {
+    if (sema->modules.search_path_count < 8) {
+        sema->modules.search_paths[sema->modules.search_path_count++] = strdup(path);
+    }
+}
+
+bool sema_analyze(SemanticAnalyzer* sema, AstProgram* program, const char* source_path) {
+    // Set current file for import resolution
+    sema->current_file = source_path;
+
+    // Process imports first
+    for (uint32_t i = 0; i < program->decl_count; i++) {
+        if (program->decls[i]->kind == DECL_IMPORT) {
+            if (!process_import(sema, &program->decls[i]->as.import, program->decls[i]->loc)) {
+                return false;
+            }
+        }
+    }
+
+    // Register all declarations (allows forward references)
     register_declarations(sema, program);
 
     // Check for main function
@@ -803,4 +1127,18 @@ const char* sema_error_msg(SemanticAnalyzer* sema) {
 
 SourceLoc sema_error_loc(SemanticAnalyzer* sema) {
     return sema->error_loc;
+}
+
+uint32_t sema_get_module_programs(SemanticAnalyzer* sema, AstProgram** programs, uint32_t max_count) {
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < sema->modules.capacity && count < max_count; i++) {
+        Module* mod = sema->modules.modules[i];
+        while (mod && count < max_count) {
+            if (mod->ast) {
+                programs[count++] = mod->ast;
+            }
+            mod = mod->next;
+        }
+    }
+    return count;
 }

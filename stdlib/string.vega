@@ -1,0 +1,41 @@
+// Vega standard library: string utilities
+
+fn len(s: str) -> int {
+    return str::len(s);
+}
+
+fn contains(s: str, substr: str) -> bool {
+    return str::contains(s, substr);
+}
+
+fn char_at(s: str, index: int) -> str {
+    return str::char_at(s, index);
+}
+
+fn repeat(s: str, n: int) -> str {
+    let result = "";
+    let i = 0;
+    while i < n {
+        result = result + s;
+        i = i + 1;
+    }
+    return result;
+}
+
+fn pad_left(s: str, width: int, pad: str) -> str {
+    let current_len = str::len(s);
+    if current_len >= width {
+        return s;
+    }
+    let padding = repeat(pad, width - current_len);
+    return padding + s;
+}
+
+fn pad_right(s: str, width: int, pad: str) -> str {
+    let current_len = str::len(s);
+    if current_len >= width {
+        return s;
+    }
+    let padding = repeat(pad, width - current_len);
+    return s + padding;
+}

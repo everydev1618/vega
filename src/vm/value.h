@@ -168,5 +168,7 @@ VegaResult* result_err(Value error);
 bool result_is_ok(VegaResult* r);
 Value result_unwrap(VegaResult* r);
 Value result_unwrap_err(VegaResult* r);
+Value value_result_ok(Value value);
+Value value_result_err(Value error);
 
 #endif // VEGA_VALUE_H

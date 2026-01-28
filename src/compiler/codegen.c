@@ -40,12 +40,43 @@ static void patch_jump(CodeGen* cg, uint32_t offset, int16_t jump) {
     cg->code[offset + 1] = (jump >> 8) & 0xFF;
 }
 
+// Process escape sequences in a string
+static char* process_escapes(const char* str, uint32_t length, uint32_t* out_length) {
+    char* result = malloc(length + 1);
+    uint32_t j = 0;
+
+    for (uint32_t i = 0; i < length; i++) {
+        if (str[i] == '\\' && i + 1 < length) {
+            i++;
+            switch (str[i]) {
+                case 'n':  result[j++] = '\n'; break;
+                case 'r':  result[j++] = '\r'; break;
+                case 't':  result[j++] = '\t'; break;
+                case '\\': result[j++] = '\\'; break;
+                case '"':  result[j++] = '"'; break;
+                case '0':  result[j++] = '\0'; break;
+                default:   result[j++] = str[i]; break;
+            }
+        } else {
+            result[j++] = str[i];
+        }
+    }
+    result[j] = '\0';
+    *out_length = j;
+    return result;
+}
+
 // Add string to constant pool, return index
 static uint16_t add_string_constant(CodeGen* cg, const char* str, uint32_t length) {
+    // Process escape sequences
+    uint32_t processed_len;
+    char* processed = process_escapes(str, length, &processed_len);
+
     // Check if already interned
     for (uint32_t i = 0; i < cg->string_count; i++) {
-        if (strlen(cg->strings[i]) == length &&
-            memcmp(cg->strings[i], str, length) == 0) {
+        if (strlen(cg->strings[i]) == processed_len &&
+            memcmp(cg->strings[i], processed, processed_len) == 0) {
+            free(processed);
             return cg->string_indices[i];
         }
     }
@@ -54,17 +85,17 @@ static uint16_t add_string_constant(CodeGen* cg, const char* str, uint32_t lengt
     uint16_t idx = cg->const_size;
 
     // Grow if needed
-    if (cg->const_size + 3 + length >= cg->const_capacity) {
+    if (cg->const_size + 3 + processed_len >= cg->const_capacity) {
         cg->const_capacity = cg->const_capacity == 0 ? 1024 : cg->const_capacity * 2;
         cg->constants = realloc(cg->constants, cg->const_capacity);
     }
 
     // Write string constant: type (1) + length (2) + data
     cg->constants[cg->const_size++] = CONST_STRING;
-    cg->constants[cg->const_size++] = length & 0xFF;
-    cg->constants[cg->const_size++] = (length >> 8) & 0xFF;
-    memcpy(cg->constants + cg->const_size, str, length);
-    cg->const_size += length;
+    cg->constants[cg->const_size++] = processed_len & 0xFF;
+    cg->constants[cg->const_size++] = (processed_len >> 8) & 0xFF;
+    memcpy(cg->constants + cg->const_size, processed, processed_len);
+    cg->const_size += processed_len;
 
     // Intern for deduplication
     if (cg->string_count >= cg->string_capacity) {
@@ -72,7 +103,7 @@ static uint16_t add_string_constant(CodeGen* cg, const char* str, uint32_t lengt
         cg->strings = realloc(cg->strings, cg->string_capacity * sizeof(char*));
         cg->string_indices = realloc(cg->string_indices, cg->string_capacity * sizeof(uint16_t));
     }
-    cg->strings[cg->string_count] = strndup(str, length);
+    cg->strings[cg->string_count] = processed;  // transfer ownership
     cg->string_indices[cg->string_count] = idx;
     cg->string_count++;
 
@@ -357,6 +388,73 @@ static void emit_expr(CodeGen* cg, AstExpr* expr) {
             emit_expr(cg, expr->as.index.index);
             emit_byte(cg, OP_ARRAY_GET);
             break;
+
+        case EXPR_OK:
+            emit_expr(cg, expr->as.result_val.value);
+            emit_byte(cg, OP_RESULT_OK);
+            break;
+
+        case EXPR_ERR:
+            emit_expr(cg, expr->as.result_val.value);
+            emit_byte(cg, OP_RESULT_ERR);
+            break;
+
+        case EXPR_MATCH: {
+            // Emit scrutinee (the Result value)
+            emit_expr(cg, expr->as.match.scrutinee);
+
+            // For each arm, emit: DUP, IS_OK check, jump if not match, unwrap, body
+            // Simple approach: check is_ok, branch accordingly
+
+            // We only handle the simple case of Ok(x) => ... and Err(x) => ...
+            emit_byte(cg, OP_DUP);  // Keep copy for second arm
+            emit_byte(cg, OP_RESULT_IS_OK);
+
+            // Jump to err arm if not ok
+            emit_byte(cg, OP_JUMP_IF_NOT);
+            uint32_t to_err = current_offset(cg);
+            emit_u16(cg, 0);  // Placeholder
+
+            // Ok arm: unwrap and execute body
+            // Find the Ok arm
+            for (uint32_t i = 0; i < expr->as.match.arm_count; i++) {
+                if (expr->as.match.arms[i].is_ok) {
+                    // Bind the unwrapped value
+                    uint8_t slot = add_local(cg, expr->as.match.arms[i].binding_name);
+                    emit_byte(cg, OP_RESULT_UNWRAP);
+                    emit_byte(cg, OP_STORE_LOCAL);
+                    emit_byte(cg, slot);
+                    emit_expr(cg, expr->as.match.arms[i].body);
+                    break;
+                }
+            }
+
+            // Jump over err arm
+            emit_byte(cg, OP_JUMP);
+            uint32_t to_end = current_offset(cg);
+            emit_u16(cg, 0);
+
+            // Patch jump to err arm
+            int16_t err_offset = (int16_t)(current_offset(cg) - to_err - 2);
+            patch_jump(cg, to_err, err_offset);
+
+            // Err arm: unwrap error and execute body
+            for (uint32_t i = 0; i < expr->as.match.arm_count; i++) {
+                if (!expr->as.match.arms[i].is_ok) {
+                    uint8_t slot = add_local(cg, expr->as.match.arms[i].binding_name);
+                    emit_byte(cg, OP_RESULT_UNWRAP);
+                    emit_byte(cg, OP_STORE_LOCAL);
+                    emit_byte(cg, slot);
+                    emit_expr(cg, expr->as.match.arms[i].body);
+                    break;
+                }
+            }
+
+            // Patch end jump
+            int16_t end_offset = (int16_t)(current_offset(cg) - to_end - 2);
+            patch_jump(cg, to_end, end_offset);
+            break;
+        }
 
         default:
             break;
@@ -653,6 +751,24 @@ static void emit_tool(CodeGen* cg, const char* agent_name, ToolDecl* tool) {
     func->local_count = (uint16_t)cg->local_count;
     func->code_offset = start_offset;
     func->code_length = current_offset(cg) - start_offset;
+
+    // Store parameter names and types as a constant string: "name1:type1,name2:type2"
+    if (tool->param_count > 0) {
+        char params_str[1024] = "";
+        int offset = 0;
+        for (uint32_t i = 0; i < tool->param_count; i++) {
+            if (i > 0) params_str[offset++] = ',';
+            offset += snprintf(params_str + offset, sizeof(params_str) - offset,
+                "%s:%s",
+                tool->params[i].name,
+                tool->params[i].type.name ? tool->params[i].type.name : "str");
+        }
+        // Store with qualified name + "$params" suffix
+        char params_key[280];
+        snprintf(params_key, sizeof(params_key), "%s$params", qualified_name);
+        add_string_constant(cg, params_key, strlen(params_key));
+        add_string_constant(cg, params_str, strlen(params_str));
+    }
 }
 
 static void emit_agent(CodeGen* cg, AgentDecl* agent) {

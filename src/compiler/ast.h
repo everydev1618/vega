@@ -38,6 +38,9 @@ typedef enum {
     EXPR_SPAWN,
     EXPR_MESSAGE,       // agent <- "message"
     EXPR_AWAIT,
+    EXPR_OK,            // Ok(value)
+    EXPR_ERR,           // Err(value)
+    EXPR_MATCH,         // match expr { ... }
 } AstExprKind;
 
 typedef enum {
@@ -160,8 +163,27 @@ struct AstExpr {
         struct {
             AstExpr* future;
         } await;
+
+        // Ok(value) and Err(value)
+        struct {
+            AstExpr* value;
+        } result_val;
+
+        // Match expression
+        struct {
+            AstExpr* scrutinee;
+            struct MatchArm* arms;
+            uint32_t arm_count;
+        } match;
     } as;
 };
+
+// Match arm for pattern matching
+typedef struct MatchArm {
+    bool is_ok;             // true for Ok(x), false for Err(x)
+    char* binding_name;     // The variable name in Ok(x) or Err(x)
+    AstExpr* body;          // The expression to execute
+} MatchArm;
 
 // ============================================================================
 // Statement Types
@@ -181,9 +203,12 @@ typedef enum {
 } AstStmtKind;
 
 // Type annotation
-typedef struct {
-    char* name;         // Type name (str, int, bool, void, etc.)
-    bool is_array;      // Is this type[]?
+typedef struct TypeAnnotation {
+    char* name;                     // Type name (str, int, bool, void, Result, etc.)
+    bool is_array;                  // Is this type[]?
+    bool is_result;                 // Is this Result<T, E>?
+    struct TypeAnnotation* ok_type; // For Result<T, E>, the T type
+    struct TypeAnnotation* err_type; // For Result<T, E>, the E type
 } TypeAnnotation;
 
 // Statement node
@@ -252,7 +277,14 @@ typedef enum {
     DECL_AGENT,
     DECL_FUNCTION,
     DECL_TOOL,
+    DECL_IMPORT,
 } AstDeclKind;
+
+// Import declaration
+typedef struct {
+    char* path;         // Module path (e.g., "stdlib/math" or "./utils")
+    char* alias;        // Optional namespace alias (e.g., "as m")
+} ImportDecl;
 
 // Parameter
 typedef struct {
@@ -301,6 +333,7 @@ struct AstDecl {
         AgentDecl agent;
         FunctionDecl function;
         ToolDecl tool;
+        ImportDecl import;
     } as;
 };
 
@@ -335,6 +368,9 @@ AstExpr* ast_spawn(const char* agent_name, bool is_async, SourceLoc loc);
 AstExpr* ast_spawn_supervised(const char* agent_name, AstSupervisionConfig* config, SourceLoc loc);
 AstExpr* ast_message(AstExpr* target, AstExpr* message, SourceLoc loc);
 AstExpr* ast_await(AstExpr* future, SourceLoc loc);
+AstExpr* ast_ok(AstExpr* value, SourceLoc loc);
+AstExpr* ast_err(AstExpr* value, SourceLoc loc);
+AstExpr* ast_match(AstExpr* scrutinee, MatchArm* arms, uint32_t arm_count, SourceLoc loc);
 
 // Supervision config
 AstSupervisionConfig* ast_supervision_config(AstRestartStrategy strategy, uint32_t max_restarts, uint32_t window_ms);
@@ -352,6 +388,9 @@ AstStmt* ast_block_stmt(AstStmt** stmts, uint32_t count, SourceLoc loc);
 
 // Type annotation
 TypeAnnotation* ast_type_annotation(const char* name, bool is_array);
+
+// Declarations
+AstDecl* ast_import(const char* path, const char* alias, SourceLoc loc);
 
 // Program
 AstProgram* ast_program_new(void);

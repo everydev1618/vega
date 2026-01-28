@@ -209,6 +209,35 @@ AstExpr* ast_index(AstExpr* object, AstExpr* index, SourceLoc loc) {
     return expr;
 }
 
+AstExpr* ast_ok(AstExpr* value, SourceLoc loc) {
+    AstExpr* expr = malloc(sizeof(AstExpr));
+    if (!expr) return NULL;
+    expr->kind = EXPR_OK;
+    expr->loc = loc;
+    expr->as.result_val.value = value;
+    return expr;
+}
+
+AstExpr* ast_err(AstExpr* value, SourceLoc loc) {
+    AstExpr* expr = malloc(sizeof(AstExpr));
+    if (!expr) return NULL;
+    expr->kind = EXPR_ERR;
+    expr->loc = loc;
+    expr->as.result_val.value = value;
+    return expr;
+}
+
+AstExpr* ast_match(AstExpr* scrutinee, MatchArm* arms, uint32_t arm_count, SourceLoc loc) {
+    AstExpr* expr = malloc(sizeof(AstExpr));
+    if (!expr) return NULL;
+    expr->kind = EXPR_MATCH;
+    expr->loc = loc;
+    expr->as.match.scrutinee = scrutinee;
+    expr->as.match.arms = arms;
+    expr->as.match.arm_count = arm_count;
+    return expr;
+}
+
 // ============================================================================
 // Statement Constructors
 // ============================================================================
@@ -309,6 +338,20 @@ TypeAnnotation* ast_type_annotation(const char* name, bool is_array) {
     type->name = strdup_safe(name);
     type->is_array = is_array;
     return type;
+}
+
+// ============================================================================
+// Declarations
+// ============================================================================
+
+AstDecl* ast_import(const char* path, const char* alias, SourceLoc loc) {
+    AstDecl* decl = malloc(sizeof(AstDecl));
+    if (!decl) return NULL;
+    decl->kind = DECL_IMPORT;
+    decl->loc = loc;
+    decl->as.import.path = strdup_safe(path);
+    decl->as.import.alias = alias ? strdup_safe(alias) : NULL;
+    return decl;
 }
 
 // ============================================================================
@@ -492,6 +535,10 @@ void ast_decl_free(AstDecl* decl) {
             break;
         case DECL_TOOL:
             tool_decl_free(&decl->as.tool);
+            break;
+        case DECL_IMPORT:
+            free(decl->as.import.path);
+            free(decl->as.import.alias);
             break;
     }
 
@@ -734,6 +781,13 @@ void ast_print_decl(AstDecl* decl, int indent) {
             break;
         case DECL_TOOL:
             printf("Tool(%s)\n", decl->as.tool.name);
+            break;
+        case DECL_IMPORT:
+            printf("Import(\"%s\"", decl->as.import.path);
+            if (decl->as.import.alias) {
+                printf(" as %s", decl->as.import.alias);
+            }
+            printf(")\n");
             break;
     }
 }
