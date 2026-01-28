@@ -1,132 +1,209 @@
 # Vega
 
-A compiled language for fault-tolerant AI agent orchestration.
+**The programming language for the agentic era.**
 
-## Overview
-
-Vega is a C-like language for building AI agent systems that don't fall over. It compiles to bytecode and runs on the Vega VM, which provides **supervision trees**, **automatic parallelization**, and **cost control** as first-class runtime features.
-
-**Why not just use Python?** You can. But then you're implementing retries, rate limiting, error recovery, parallel execution, cost tracking, and observability yourself. Vega's runtime handles all of that so you can focus on the actual agent logic.
-
-### Key Features
-
-- **Supervision trees** - Agents crash. The runtime restarts them automatically (Erlang-style).
-- **Automatic parallelization** - Write sequential code, get parallel API calls. Compiler analyzes dataflow.
-- **Budgets as primitives** - `budget $5.00 { ... }` is a language construct, not an afterthought.
-- **Built-in backpressure** - Rate limits, retries, circuit breakers handled by the VM.
-- **Observability by default** - Every agent call traced. Costs, tokens, latency tracked automatically.
-
-See [docs/SPEC.md](docs/SPEC.md) for the full language specification and [docs/TODO.md](docs/TODO.md) for the development roadmap.
-
-## Quick Start
-
-```bash
-# Compile a Vega program
-vegac agent.vega -o agent.vgb
-
-# Run the bytecode
-vega agent.vgb
-```
-
-## Example
+Vega is a statically-typed, compiled language purpose-built for AI agents. It compiles to bytecode and runs on the Vega VM, where fault tolerance, cost control, and observability are first-class concerns—not afterthoughts.
 
 ```vega
 agent Coder {
     model "claude-sonnet-4-20250514"
     system "You write clean, efficient code."
     temperature 0.3
-    budget $0.50                           // Max cost per invocation
-
-    retry {
-        max_attempts 3
-        backoff exponential(100ms, 2.0)
-    }
 
     tool read_file(path: str) -> str {
         return file::read(path);
     }
 }
 
-agent Reviewer {
-    model "claude-sonnet-4-20250514"
-    system "You review code for bugs and style issues."
-}
-
 fn main() {
-    // Spawn with supervision - auto-restart on failure
     let coder = spawn Coder supervised by {
         strategy restart
         max_restarts 3
     };
-    let reviewer = spawn Reviewer;
 
-    // Session budget - all calls share this limit
-    session budget $10.00 {
-        let code = coder <- "Write a function to sort a linked list";
-        let review = reviewer <- code;
+    let code = coder <- "Write a function to sort a linked list";
+    print(code);
+}
+```
 
-        if review.has("issues") {
-            let fixed = coder <- "Fix these issues: " + review;
-            print(fixed);
-        } else {
-            print(code);
-        }
+## Why Vega?
+
+Building reliable AI agent systems in Python means implementing retries, rate limiting, error recovery, cost tracking, and observability yourself. Every team rebuilds the same infrastructure.
+
+Vega's runtime handles all of that:
+
+| Problem | Python + SDK | Vega |
+|---------|--------------|------|
+| Agent crashes | Try/except everywhere | Supervision trees auto-restart |
+| Rate limits | Manual backoff logic | Built into the VM |
+| Cost overruns | Hope for the best | `budget $5.00 { ... }` |
+| Parallel calls | asyncio complexity | Automatic dataflow analysis |
+| Observability | Add logging manually | Every call traced by default |
+
+## Quick Start
+
+```bash
+# Build
+make
+
+# Set your API key
+export ANTHROPIC_API_KEY=sk-...
+
+# Compile and run
+./bin/vegac examples/hello.vega -o hello.vgb
+./bin/vega hello.vgb
+```
+
+## Language Overview
+
+### Agents
+
+Agents wrap LLM calls with configuration. They maintain conversation history automatically.
+
+```vega
+agent Assistant {
+    model "claude-sonnet-4-20250514"
+    system "You are a helpful assistant."
+    temperature 0.7
+}
+
+fn main() {
+    let assistant = spawn Assistant;
+
+    // Send a message, get a response
+    let response = assistant <- "What is the capital of France?";
+    print(response);
+
+    // Conversation history is maintained
+    let followup = assistant <- "What's the population?";
+    print(followup);
+}
+```
+
+### Tools
+
+Agents can call back into Vega code:
+
+```vega
+agent Researcher {
+    model "claude-sonnet-4-20250514"
+    system "Research topics using available tools."
+
+    tool read_file(path: str) -> str {
+        return file::read(path);
+    }
+
+    tool list_dir(path: str) -> str {
+        return file::list(path);
+    }
+}
+
+fn main() {
+    let researcher = spawn Researcher;
+    let analysis = researcher <- "Summarize the code in src/main.c";
+    print(analysis);
+}
+```
+
+### Supervision
+
+Agents fail. Networks timeout. APIs rate-limit. Vega handles this with Erlang-style supervision:
+
+```vega
+fn main() {
+    // If this agent crashes, restart it (up to 3 times per minute)
+    let worker = spawn Worker supervised by {
+        strategy restart
+        max_restarts 3
+        window 60000
+    };
+
+    // Use the agent normally - failures are handled automatically
+    let result = worker <- "Do something that might fail";
+    print(result);
+}
+```
+
+### Control Flow
+
+Standard imperative constructs:
+
+```vega
+fn factorial(n: int) -> int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() {
+    // While loops
+    let i = 0;
+    while i < 5 {
+        print(factorial(i));
+        i = i + 1;
+    }
+
+    // For loops
+    for let j = 0; j < 5; j {
+        print(j);
+        j = j + 1;
     }
 }
 ```
 
-### Automatic Parallelization
-
-The compiler analyzes dataflow. Independent calls run in parallel automatically:
+### String Operations
 
 ```vega
-fn review_all(files: str[]) {
-    // These have no data dependencies - compiler parallelizes them
-    let review1 = reviewer <- files[0];
-    let review2 = reviewer <- files[1];
-    let review3 = reviewer <- files[2];
+fn main() {
+    let text = "Hello, World!";
 
-    // This depends on all three - waits for completion
-    let summary = summarizer <- review1 + review2 + review3;
-    return summary;
+    // Check if string contains substring
+    if text.has("World") {
+        print("Found it!");
+    }
+
+    // Concatenation
+    let greeting = "Hello, " + "Vega!";
+    print(greeting);
 }
 ```
 
-### Streaming
+## Project Structure
 
-```vega
-// Stream long responses chunk by chunk
-for chunk in writer <~ "Write a 10-page story" {
-    print(chunk);
-}
 ```
-
-## Status
-
-**Early development.** The compiler frontend (lexer, parser, AST) exists. The VM and code generator are not yet implemented. See [docs/TODO.md](docs/TODO.md) for what's done and what's next.
+src/
+  compiler/    # Lexer, parser, semantic analysis, code generation
+  vm/          # Bytecode interpreter, agent runtime, scheduler
+  common/      # Shared utilities (memory management, bytecode spec)
+  stdlib/      # Standard library (file I/O, strings, JSON)
+examples/      # Example programs
+docs/          # Language specification and design docs
+```
 
 ## Building
 
 Requirements:
 - C compiler (gcc or clang)
 - libcurl
-- cJSON
+- make
 
 ```bash
-make          # Build both vegac and vega
-make vegac    # Build just the compiler
-make vega     # Build just the VM
-make test     # Run tests
-make clean    # Clean build artifacts
+make              # Build everything
+make clean        # Clean build artifacts
+make run EXAMPLE=hello   # Compile and run an example
 ```
 
-## Environment
+## Status
 
-Set your Anthropic API key:
+The core language is functional:
+- Compiler (lexer, parser, semantic analysis, code generation)
+- VM (bytecode interpreter, stack machine)
+- Agent runtime (spawn, message passing, tool execution)
+- Supervision (process model, restart strategies)
+- Anthropic API integration
 
-```bash
-export ANTHROPIC_API_KEY=your-key-here
-```
+See [docs/TODO.md](docs/TODO.md) for the roadmap.
 
 ## License
 
