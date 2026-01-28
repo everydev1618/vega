@@ -1,0 +1,83 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Build
+        run: make release
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vega-linux-x64
+          path: bin/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make release
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vega-macos-x64
+          path: bin/
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vega-linux-x64
+          path: vega-linux-x64
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vega-macos-x64
+          path: vega-macos-x64
+
+      - name: Package Linux
+        run: |
+          cd vega-linux-x64
+          chmod +x vega vegac
+          tar -czvf ../vega-linux-x64.tar.gz vega vegac
+
+      - name: Package macOS
+        run: |
+          cd vega-macos-x64
+          chmod +x vega vegac
+          tar -czvf ../vega-macos-x64.tar.gz vega vegac
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            vega-linux-x64.tar.gz
+            vega-macos-x64.tar.gz

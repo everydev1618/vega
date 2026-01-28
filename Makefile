@@ -130,3 +130,14 @@ run-verbose: all
 	@$(BIN_DIR)/vegac -v examples/$(EXAMPLE).vega -o $(BUILD_DIR)/$(EXAMPLE).vgb
 	@echo "=== Running $(EXAMPLE) ==="
 	@$(BIN_DIR)/vega $(BUILD_DIR)/$(EXAMPLE).vgb
+
+# Cross-compile for Linux using Docker
+linux:
+	@echo "Building for Linux via Docker..."
+	docker build -t vega-linux-builder .
+	@mkdir -p bin-linux
+	docker create --name vega-extract vega-linux-builder
+	docker cp vega-extract:/vega/bin/vega bin-linux/vega
+	docker cp vega-extract:/vega/bin/vegac bin-linux/vegac
+	docker rm vega-extract
+	@echo "Linux binaries in bin-linux/"
