@@ -1,0 +1,108 @@
+// code_analyzer.vega - Multi-agent code analysis pipeline
+//
+// This example demonstrates the power of the Vega TUI by:
+// - Spawning multiple agents (visible in Agents panel)
+// - Making tool calls (visible in Tools panel)
+// - Multi-turn conversations (visible in Messages panel)
+// - Multiple API requests with timing (visible in Logs panel)
+//
+// Run with: ./bin/vega tui build/code_analyzer.vgb
+// Or: make tui EXAMPLE=code_analyzer
+
+agent Analyzer {
+    model "claude-sonnet-4-20250514"
+    system "You analyze code for bugs, security issues, memory leaks, and potential improvements. Be thorough but concise. Format findings as bullet points with severity levels."
+    temperature 0.2
+
+    tool read_file(path: str) -> str {
+        return file::read(path);
+    }
+}
+
+agent SecurityReviewer {
+    model "claude-sonnet-4-20250514"
+    system "You are a security expert. Focus on: buffer overflows, injection vulnerabilities, authentication issues, and unsafe memory operations. Rate each finding as Critical/High/Medium/Low."
+    temperature 0.1
+
+    tool read_file(path: str) -> str {
+        return file::read(path);
+    }
+}
+
+agent Summarizer {
+    model "claude-sonnet-4-20250514"
+    system "You synthesize technical analysis reports into actionable summaries. Create a prioritized action plan grouped by severity. Be direct and actionable."
+    temperature 0.4
+}
+
+fn main() {
+    // Spawn our analysis team
+    let analyzer = spawn Analyzer;
+    let security = spawn SecurityReviewer;
+    let summarizer = spawn Summarizer;
+
+    print("==============================================");
+    print("  Vega Code Analyzer - Multi-Agent Pipeline");
+    print("==============================================");
+    print("");
+
+    // Phase 1: Code quality analysis
+    print("[Phase 1] Code quality analysis...");
+    print("");
+    let analysis1 = analyzer <- "Read and analyze src/vm/agent.c - Look for: 1) Memory management issues (leaks, double-frees) 2) Error handling gaps 3) Code quality issues 4) Potential race conditions";
+    print("=== Code Quality Analysis: agent.c ===");
+    print(analysis1);
+    print("");
+
+    // Phase 2: Security review of same file
+    print("----------------------------------------------");
+    print("[Phase 2] Security review...");
+    print("");
+    let security1 = security <- "Perform a security audit of src/vm/agent.c - Focus on: 1) Buffer overflows 2) Input validation 3) Unsafe string operations 4) Memory corruption risks";
+    print("=== Security Review: agent.c ===");
+    print(security1);
+    print("");
+
+    // Phase 3: Analyze HTTP client
+    print("----------------------------------------------");
+    print("[Phase 3] Analyzing HTTP client...");
+    print("");
+    let analysis2 = analyzer <- "Now read and analyze src/vm/http.c - Focus on: 1) Network error handling 2) Buffer management 3) API response parsing safety 4) Timeout handling";
+    print("=== Code Quality Analysis: http.c ===");
+    print(analysis2);
+    print("");
+
+    // Phase 4: Security review of HTTP
+    print("----------------------------------------------");
+    print("[Phase 4] Security review of HTTP client...");
+    print("");
+    let security2 = security <- "Security audit of src/vm/http.c - Look for: 1) SSL/TLS issues 2) Header injection 3) Response parsing vulnerabilities 4) Credential handling";
+    print("=== Security Review: http.c ===");
+    print(security2);
+    print("");
+
+    // Phase 5: Synthesize into actionable report
+    print("==============================================");
+    print("[Phase 5] Generating final report...");
+    print("==============================================");
+    print("");
+
+    let synthesis_prompt = "Create a prioritized action plan from these findings. Group by severity (Critical > High > Medium > Low) and estimate effort for each fix:\n\n## Code Quality - agent.c:\n" + analysis1 + "\n\n## Security - agent.c:\n" + security1 + "\n\n## Code Quality - http.c:\n" + analysis2 + "\n\n## Security - http.c:\n" + security2;
+
+    let report = summarizer <- synthesis_prompt;
+
+    print("============================================");
+    print("            FINAL ANALYSIS REPORT");
+    print("============================================");
+    print("");
+    print(report);
+    print("");
+    print("============================================");
+    print("");
+    print("Watch the TUI panels during execution:");
+    print("  - AGENTS: See 3 agents with token counts");
+    print("  - MESSAGES: Click agents to see conversations");
+    print("  - TOOLS: Watch file reads happen in real-time");
+    print("  - LOGS: Track API calls, timing, and costs");
+    print("============================================");
+}

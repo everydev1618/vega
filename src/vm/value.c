@@ -433,3 +433,45 @@ Value value_result_err(Value error) {
     VegaResult* r = result_err(error);
     return (Value){.type = VAL_RESULT, .as.result = r};
 }
+
+// ============================================================================
+// Future Operations
+// ============================================================================
+
+VegaFuture* future_new(VegaAgent* agent, uint32_t request_id) {
+    VegaFuture* f = vega_obj_alloc(sizeof(VegaFuture), OBJ_FUTURE);
+    if (!f) return NULL;
+
+    f->request_id = request_id;
+    f->state = FUTURE_PENDING;
+    f->agent = agent;
+    f->result = NULL;
+    f->error = NULL;
+
+    return f;
+}
+
+void future_set_result(VegaFuture* f, VegaString* result) {
+    if (!f) return;
+    f->state = FUTURE_READY;
+    f->result = result;
+    if (result) {
+        vega_obj_retain(result);
+    }
+}
+
+void future_set_error(VegaFuture* f, const char* error) {
+    if (!f) return;
+    f->state = FUTURE_ERROR;
+    free(f->error);
+    f->error = error ? strdup(error) : NULL;
+}
+
+bool future_is_ready(VegaFuture* f) {
+    return f && (f->state == FUTURE_READY || f->state == FUTURE_ERROR);
+}
+
+VegaString* future_get_result(VegaFuture* f) {
+    if (!f || f->state != FUTURE_READY) return NULL;
+    return f->result;
+}

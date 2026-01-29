@@ -1,0 +1,47 @@
+// Async agent execution example
+// Uses <~ to send messages in parallel, await to get results
+
+agent Coder {
+    model "claude-sonnet-4-20250514"
+    system "You write code. Be concise - return only the code, no explanation."
+    temperature 0.3
+}
+
+agent Reviewer {
+    model "claude-sonnet-4-20250514"
+    system "You review code for bugs. Say APPROVED if good, otherwise list issues briefly."
+    temperature 0.2
+}
+
+agent Tester {
+    model "claude-sonnet-4-20250514"
+    system "You write test cases for code. Return only the tests."
+    temperature 0.3
+}
+
+fn main() {
+    let coder = spawn Coder;
+    let reviewer = spawn Reviewer;
+    let tester = spawn Tester;
+
+    // Get initial code synchronously
+    print("Writing code...");
+    let code = coder <- "Write a Python function to check if a number is prime";
+    print("Code ready:");
+    print(code);
+
+    // Send review and test requests in parallel using <~
+    print("\nStarting parallel review and test generation...");
+    let review_future = reviewer <~ "Review this code:\n" + code;
+    let tests_future = tester <~ "Write tests for:\n" + code;
+
+    // Wait for both results
+    let review = await review_future;
+    let tests = await tests_future;
+
+    print("\n=== Review ===");
+    print(review);
+
+    print("\n=== Tests ===");
+    print(tests);
+}

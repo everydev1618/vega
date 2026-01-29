@@ -40,6 +40,19 @@ VegaProcess* process_create(VegaVM* vm, uint32_t parent_pid) {
     proc->supervision.restart_count = 0;
     proc->supervision.window_start = current_time_ms();
 
+    // Default backoff config
+    proc->supervision.backoff = BACKOFF_EXPONENTIAL;
+    proc->supervision.base_delay_ms = 1000;    // 1 second base
+    proc->supervision.max_delay_ms = 30000;    // 30 second max
+    proc->supervision.next_retry_at = 0;
+
+    // Default circuit breaker config
+    proc->supervision.circuit_state = CIRCUIT_CLOSED;
+    proc->supervision.failure_threshold = 5;
+    proc->supervision.failure_count = 0;
+    proc->supervision.circuit_opened_at = 0;
+    proc->supervision.cooldown_ms = 60000;     // 1 minute cooldown
+
     proc->is_supervisor = false;
     proc->exit_reason = EXIT_NORMAL;
     proc->exit_message = NULL;
@@ -253,6 +266,129 @@ void process_handle_child_exit(VegaVM* vm, VegaProcess* supervisor,
                 }
             }
             break;
+    }
+}
+
+// ============================================================================
+// Backoff and Circuit Breaker
+// ============================================================================
+
+int32_t process_schedule_retry(VegaProcess* proc) {
+    if (!proc) return -1;
+
+    uint64_t now = current_time_ms();
+    SupervisionConfig* cfg = &proc->supervision;
+
+    // Check if already past retry time
+    if (cfg->next_retry_at > 0 && now < cfg->next_retry_at) {
+        return (int32_t)(cfg->next_retry_at - now);
+    }
+
+    // Check if can restart at all
+    if (!process_can_restart(proc)) {
+        return -1;
+    }
+
+    // Calculate delay based on backoff strategy
+    uint32_t delay = 0;
+    uint32_t attempt = cfg->restart_count;
+
+    switch (cfg->backoff) {
+        case BACKOFF_NONE:
+            delay = 0;
+            break;
+
+        case BACKOFF_LINEAR:
+            delay = cfg->base_delay_ms * (attempt + 1);
+            break;
+
+        case BACKOFF_EXPONENTIAL:
+            // 2^attempt, but avoid overflow
+            if (attempt < 16) {
+                delay = cfg->base_delay_ms * (1u << attempt);
+            } else {
+                delay = cfg->max_delay_ms;
+            }
+            break;
+    }
+
+    // Cap at max delay
+    if (delay > cfg->max_delay_ms) {
+        delay = cfg->max_delay_ms;
+    }
+
+    // Schedule next retry
+    cfg->next_retry_at = now + delay;
+
+    return delay == 0 ? 0 : (int32_t)delay;
+}
+
+bool process_circuit_allows(VegaProcess* proc) {
+    if (!proc) return false;
+
+    uint64_t now = current_time_ms();
+    SupervisionConfig* cfg = &proc->supervision;
+
+    switch (cfg->circuit_state) {
+        case CIRCUIT_CLOSED:
+            return true;
+
+        case CIRCUIT_OPEN:
+            // Check if cooldown has expired
+            if (now - cfg->circuit_opened_at >= cfg->cooldown_ms) {
+                cfg->circuit_state = CIRCUIT_HALF_OPEN;
+                fprintf(stderr, "[circuit-breaker] Process %u: circuit half-open, allowing test request\n",
+                        proc->pid);
+                return true;
+            }
+            return false;
+
+        case CIRCUIT_HALF_OPEN:
+            // Allow one test request in half-open state
+            return true;
+    }
+
+    return false;
+}
+
+void process_record_success(VegaProcess* proc) {
+    if (!proc) return;
+
+    SupervisionConfig* cfg = &proc->supervision;
+
+    // Reset failure count
+    cfg->failure_count = 0;
+
+    // Close circuit if it was half-open
+    if (cfg->circuit_state == CIRCUIT_HALF_OPEN) {
+        cfg->circuit_state = CIRCUIT_CLOSED;
+        fprintf(stderr, "[circuit-breaker] Process %u: circuit closed after successful request\n",
+                proc->pid);
+    }
+}
+
+void process_record_failure(VegaProcess* proc) {
+    if (!proc) return;
+
+    SupervisionConfig* cfg = &proc->supervision;
+
+    cfg->failure_count++;
+
+    // Check if should open circuit
+    if (cfg->circuit_state == CIRCUIT_CLOSED &&
+        cfg->failure_count >= cfg->failure_threshold) {
+        cfg->circuit_state = CIRCUIT_OPEN;
+        cfg->circuit_opened_at = current_time_ms();
+        fprintf(stderr, "[circuit-breaker] Process %u: circuit opened after %u failures\n",
+                proc->pid, cfg->failure_count);
+    }
+
+    // If half-open and failed, reopen
+    if (cfg->circuit_state == CIRCUIT_HALF_OPEN) {
+        cfg->circuit_state = CIRCUIT_OPEN;
+        cfg->circuit_opened_at = current_time_ms();
+        fprintf(stderr, "[circuit-breaker] Process %u: circuit reopened after test failure\n",
+                proc->pid);
     }
 }
 

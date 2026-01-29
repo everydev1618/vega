@@ -153,10 +153,11 @@ struct AstExpr {
             AstSupervisionConfig* supervision;  // NULL if not supervised
         } spawn;
 
-        // Message: agent <- expr
+        // Message: agent <- expr (sync) or agent <~ expr (async)
         struct {
             AstExpr* target;
             AstExpr* message;
+            bool is_async;      // true for <~, false for <-
         } message;
 
         // Await: await expr
@@ -366,7 +367,7 @@ AstExpr* ast_method_call(AstExpr* object, const char* method, AstExpr** args, ui
 AstExpr* ast_field_access(AstExpr* object, const char* field, SourceLoc loc);
 AstExpr* ast_spawn(const char* agent_name, bool is_async, SourceLoc loc);
 AstExpr* ast_spawn_supervised(const char* agent_name, AstSupervisionConfig* config, SourceLoc loc);
-AstExpr* ast_message(AstExpr* target, AstExpr* message, SourceLoc loc);
+AstExpr* ast_message(AstExpr* target, AstExpr* message, bool is_async, SourceLoc loc);
 AstExpr* ast_await(AstExpr* future, SourceLoc loc);
 AstExpr* ast_ok(AstExpr* value, SourceLoc loc);
 AstExpr* ast_err(AstExpr* value, SourceLoc loc);

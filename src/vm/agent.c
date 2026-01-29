@@ -2,9 +2,59 @@
 #include "vm.h"
 #include "http.h"
 #include "scheduler.h"
+#include "../tui/trace.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/time.h>
+#include <unistd.h>  // for usleep
+
+// ============================================================================
+// Error Classification
+// ============================================================================
+
+typedef enum {
+    ERROR_NONE,
+    ERROR_RETRIABLE,      // Rate limit, timeout, temporary failure
+    ERROR_FATAL,          // Auth error, bad request, etc.
+} ErrorType;
+
+// Classify an HTTP status code and response body
+static ErrorType classify_error(int status_code, const char* body) {
+    if (status_code == 200) {
+        return ERROR_NONE;
+    }
+
+    // Rate limit - retriable
+    if (status_code == 429) {
+        return ERROR_RETRIABLE;
+    }
+
+    // Server errors - retriable
+    if (status_code >= 500 && status_code < 600) {
+        return ERROR_RETRIABLE;
+    }
+
+    // Timeout (status 0 usually means network error)
+    if (status_code == 0) {
+        return ERROR_RETRIABLE;
+    }
+
+    // Check for overloaded error in body
+    if (body && strstr(body, "overloaded")) {
+        return ERROR_RETRIABLE;
+    }
+
+    // All other errors are fatal (4xx except 429)
+    return ERROR_FATAL;
+}
+
+// Helper to get current time in milliseconds
+static uint64_t get_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
 
 // ============================================================================
 // JSON Parsing Helpers
@@ -55,7 +105,7 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
         return NULL;
     }
 
-    VegaAgent* agent = vega_obj_alloc(sizeof(VegaAgent) - sizeof(VegaObjHeader), OBJ_AGENT);
+    VegaAgent* agent = vega_obj_alloc(sizeof(VegaAgent), OBJ_AGENT);
     if (!agent) {
         fprintf(stderr, "Error: Failed to allocate agent\n");
         return NULL;
@@ -71,10 +121,25 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
     // Get model
     const char* model = vm_read_string(vm, def->model_idx, &len);
     agent->model = model ? strndup(model, len) : strdup("claude-sonnet-4-20250514");
+    if (!agent->model) {
+        free(agent->name);
+        free(agent);
+        return NULL;
+    }
 
     // Get system prompt
     const char* system = vm_read_string(vm, def->system_idx, &len);
-    agent->system_prompt = system ? strndup(system, len) : NULL;
+    if (system) {
+        agent->system_prompt = strndup(system, len);
+        if (!agent->system_prompt) {
+            free(agent->model);
+            free(agent->name);
+            free(agent);
+            return NULL;
+        }
+    } else {
+        agent->system_prompt = NULL;
+    }
 
     // Temperature
     agent->temperature = def->temperature_x100 / 100.0;
@@ -85,6 +150,13 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
 
     if (def->tool_count > 0) {
         agent->tools = calloc(def->tool_count, sizeof(AgentTool));
+        if (!agent->tools) {
+            free(agent->system_prompt);
+            free(agent->model);
+            free(agent->name);
+            free(agent);
+            return NULL;
+        }
 
         char prefix[256];
         snprintf(prefix, sizeof(prefix), "%s$", agent->name);
@@ -98,61 +170,79 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
             if (fn_name && fn_len > prefix_len && strncmp(fn_name, prefix, prefix_len) == 0) {
                 AgentTool* tool = &agent->tools[agent->tool_count++];
                 tool->name = strndup(fn_name + prefix_len, fn_len - prefix_len);
+                if (!tool->name) {
+                    // Allocation failed - clean up partially initialized agent
+                    agent->tool_count--;  // Don't count this failed tool
+                    agent_free(agent);
+                    return NULL;
+                }
                 tool->description = NULL;  // TODO: store descriptions in bytecode
                 tool->function_id = i;
                 tool->param_count = vm->functions[i].param_count;
 
                 // Look for param info in constant pool: "AgentName$toolname$params" -> "name:type,..."
                 if (tool->param_count > 0) {
-                    tool->param_names = malloc(tool->param_count * sizeof(char*));
-                    tool->param_types = malloc(tool->param_count * sizeof(char*));
+                    tool->param_names = calloc(tool->param_count, sizeof(char*));
+                    tool->param_types = calloc(tool->param_count, sizeof(char*));
+                    if (!tool->param_names || !tool->param_types) {
+                        // Allocation failed - set param_count to 0 and continue
+                        // (tool will still work but API won't know param names)
+                        free(tool->param_names);
+                        free(tool->param_types);
+                        tool->param_names = NULL;
+                        tool->param_types = NULL;
+                        tool->param_count = 0;
+                    } else {
+                        // Build the params key
+                        char params_key[280];
+                        snprintf(params_key, sizeof(params_key), "%.*s$params", (int)fn_len, fn_name);
 
-                    // Build the params key
-                    char params_key[280];
-                    snprintf(params_key, sizeof(params_key), "%.*s$params", (int)fn_len, fn_name);
+                        uint32_t params_len;
+                        const char* params_str = vm_find_string_after_key(vm, params_key, &params_len);
 
-                    uint32_t params_len;
-                    const char* params_str = vm_find_string_after_key(vm, params_key, &params_len);
+                        if (params_str && params_len > 0) {
+                            // Parse "name1:type1,name2:type2"
+                            char* params_copy = strndup(params_str, params_len);
+                            if (params_copy) {
+                                char* saveptr = NULL;
+                                char* token = strtok_r(params_copy, ",", &saveptr);
+                                int p = 0;
 
-                    if (params_str && params_len > 0) {
-                        // Parse "name1:type1,name2:type2"
-                        char* params_copy = strndup(params_str, params_len);
-                        char* saveptr = NULL;
-                        char* token = strtok_r(params_copy, ",", &saveptr);
-                        int p = 0;
+                                while (token && p < tool->param_count) {
+                                    char* colon = strchr(token, ':');
+                                    if (colon) {
+                                        *colon = '\0';
+                                        tool->param_names[p] = strdup(token);
+                                        tool->param_types[p] = strdup(colon + 1);
+                                    } else {
+                                        tool->param_names[p] = strdup(token);
+                                        tool->param_types[p] = strdup("str");
+                                    }
+                                    // Note: strdup failures leave NULL which is handled at use
+                                    token = strtok_r(NULL, ",", &saveptr);
+                                    p++;
+                                }
+                                free(params_copy);
 
-                        while (token && p < tool->param_count) {
-                            char* colon = strchr(token, ':');
-                            if (colon) {
-                                *colon = '\0';
-                                tool->param_names[p] = strdup(token);
-                                tool->param_types[p] = strdup(colon + 1);
-                            } else {
-                                tool->param_names[p] = strdup(token);
+                                // Fill remaining with defaults if needed
+                                while (p < tool->param_count) {
+                                    char pname[32];
+                                    snprintf(pname, sizeof(pname), "arg%d", p);
+                                    tool->param_names[p] = strdup(pname);
+                                    tool->param_types[p] = strdup("str");
+                                    p++;
+                                }
+                            }
+                        } else {
+                            // Fall back to generic names
+                            for (int p = 0; p < tool->param_count; p++) {
+                                char pname[32];
+                                snprintf(pname, sizeof(pname), "arg%d", p);
+                                tool->param_names[p] = strdup(pname);
                                 tool->param_types[p] = strdup("str");
                             }
-                            token = strtok_r(NULL, ",", &saveptr);
-                            p++;
                         }
-                        free(params_copy);
-
-                        // Fill remaining with defaults if needed
-                        while (p < tool->param_count) {
-                            char pname[32];
-                            snprintf(pname, sizeof(pname), "arg%d", p);
-                            tool->param_names[p] = strdup(pname);
-                            tool->param_types[p] = strdup("str");
-                            p++;
-                        }
-                    } else {
-                        // Fall back to generic names
-                        for (int p = 0; p < tool->param_count; p++) {
-                            char pname[32];
-                            snprintf(pname, sizeof(pname), "arg%d", p);
-                            tool->param_names[p] = strdup(pname);
-                            tool->param_types[p] = strdup("str");
-                        }
-                    }
+                    }  // end of if (param_names && param_types allocation succeeded)
                 } else {
                     tool->param_names = NULL;
                     tool->param_types = NULL;
@@ -168,13 +258,45 @@ VegaAgent* agent_spawn(VegaVM* vm, uint32_t agent_def_id) {
 
     agent->is_valid = true;
     agent->process = NULL;
+    agent->pending_request = NULL;
+    agent->async_state = AGENT_ASYNC_IDLE;
+    memset(&agent->tool_ctx, 0, sizeof(AgentToolContext));
+    agent->tool_ctx.max_iterations = 10;
+
+    // Emit trace event
+    trace_agent_spawn(agent_def_id, agent->name, agent->model);
 
     return agent;
+}
+
+// Helper to clear tool context
+static void clear_tool_context(AgentToolContext* ctx) {
+    free(ctx->assistant_content);
+    free(ctx->tool_use_id);
+    free(ctx->tool_name);
+    free(ctx->tool_input);
+    ctx->assistant_content = NULL;
+    ctx->tool_use_id = NULL;
+    ctx->tool_name = NULL;
+    ctx->tool_input = NULL;
+    ctx->iteration = 0;
 }
 
 // Internal cleanup function - called by value_release when refcount hits 0
 static void agent_cleanup(VegaAgent* agent) {
     if (!agent) return;
+
+    // Cancel any pending async request
+    if (agent->pending_request) {
+        http_async_cancel(agent->pending_request);
+        agent->pending_request = NULL;
+    }
+
+    // Clean up tool context
+    clear_tool_context(&agent->tool_ctx);
+
+    // Emit trace event before cleanup
+    trace_agent_free(agent->agent_id, agent->name);
 
     agent->is_valid = false;
 
@@ -357,26 +479,45 @@ static char* execute_tool(VegaVM* vm, VegaAgent* agent, const char* tool_name, c
 // Message Passing
 // ============================================================================
 
-static void add_message(VegaAgent* agent, const char* message) {
+// Returns false on allocation failure
+static bool add_message(VegaAgent* agent, const char* message) {
     if (agent->message_count >= agent->message_capacity) {
-        agent->message_capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
-        agent->messages = realloc(agent->messages, agent->message_capacity * sizeof(char*));
+        uint32_t new_capacity = agent->message_capacity == 0 ? 8 : agent->message_capacity * 2;
+        char** new_messages = realloc(agent->messages, new_capacity * sizeof(char*));
+        if (!new_messages) {
+            return false;  // Allocation failed, original messages preserved
+        }
+        agent->messages = new_messages;
+        agent->message_capacity = new_capacity;
     }
-    agent->messages[agent->message_count++] = strdup(message);
+    char* msg_copy = strdup(message);
+    if (!msg_copy) {
+        return false;  // strdup failed
+    }
+    agent->messages[agent->message_count++] = msg_copy;
+    return true;
 }
 
 VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message) {
     if (!agent || !agent->is_valid) {
+        trace_error(0, "Invalid agent");
         return vega_string_from_cstr("Error: Invalid agent");
     }
 
     if (!vm->api_key) {
-        fprintf(stderr, "Error: ANTHROPIC_API_KEY not set\n");
+        trace_error(agent->agent_id, "ANTHROPIC_API_KEY not set");
         return vega_string_from_cstr("Error: ANTHROPIC_API_KEY not set");
     }
 
+    // Emit trace for message send
+    trace_msg_send(agent->agent_id, agent->name, message);
+    uint64_t start_time = get_time_ms();
+
     // Add user message to history
-    add_message(agent, message);
+    if (!add_message(agent, message)) {
+        trace_error(agent->agent_id, "Out of memory adding message to history");
+        return vega_string_from_cstr("Error: Out of memory");
+    }
 
     // Build tool definitions if agent has tools
     ToolDefinition* tool_defs = NULL;
@@ -419,9 +560,30 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
             );
         }
 
+        fflush(stderr);
+
         if (!resp) {
+            trace_error(agent->agent_id, "Failed to send HTTP request");
             free(tool_defs);
             return vega_string_from_cstr("Error: Failed to send message");
+        }
+
+        // Track token usage for budget
+        vm_add_token_usage(vm, resp->tokens.input_tokens, resp->tokens.output_tokens);
+
+        // Check budget limits
+        if (vm_budget_exceeded(vm)) {
+            char error_buf[256];
+            snprintf(error_buf, sizeof(error_buf),
+                    "Error: Budget exceeded (in: %llu, out: %llu, cost: $%.4f)",
+                    (unsigned long long)vm->budget_used_input_tokens,
+                    (unsigned long long)vm->budget_used_output_tokens,
+                    vm->budget_used_cost_usd);
+            VegaString* result = vega_string_from_cstr(error_buf);
+            http_response_free(resp);
+            free(tool_defs);
+            trace_error(agent->agent_id, "Budget exceeded");
+            return result;
         }
 
         if (resp->error) {
@@ -450,8 +612,14 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
 
             char* tool_name = anthropic_extract_tool_use(resp->body, &tool_id, &tool_input);
             if (tool_name) {
+                // Emit trace for tool call
+                trace_tool_call(agent->agent_id, agent->name, tool_name, tool_input);
+
                 // Execute the tool
                 char* tool_result = execute_tool(vm, agent, tool_name, tool_input);
+
+                // Emit trace for tool result
+                trace_tool_result(agent->agent_id, agent->name, tool_name, tool_result);
 
                 // Extract content array from assistant response for proper API formatting
                 char* assistant_content = NULL;
@@ -468,11 +636,11 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
                             else if (*content_end == '"') {
                                 content_end++;
                                 while (*content_end && *content_end != '"') {
-                                    if (*content_end == '\\') content_end++;
+                                    if (*content_end == '\\' && *(content_end + 1)) content_end++;
                                     content_end++;
                                 }
                             }
-                            content_end++;
+                            if (*content_end) content_end++;
                         }
                         assistant_content = strndup(content_start, content_end - content_start);
                     }
@@ -511,7 +679,12 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
                     // Got final response
                     char* text = anthropic_extract_text(resp->body);
                     if (text) {
-                        add_message(agent, text);
+                        uint64_t duration = get_time_ms() - start_time;
+                        TokenUsage tokens = {0};  // TODO: parse from response
+                        trace_msg_recv(agent->agent_id, agent->name, text, &tokens, duration);
+
+                        // Best effort - history add failure is non-fatal
+                        (void)add_message(agent, text);
                         VegaString* result = vega_string_from_cstr(text);
                         free(text);
                         http_response_free(resp);
@@ -531,12 +704,18 @@ VegaString* agent_send_message(VegaVM* vm, VegaAgent* agent, const char* message
         free(tool_defs);
 
         if (text) {
-            add_message(agent, text);
+            uint64_t duration = get_time_ms() - start_time;
+            TokenUsage tokens = {0};  // TODO: parse from response
+            trace_msg_recv(agent->agent_id, agent->name, text, &tokens, duration);
+
+            // Best effort - history add failure is non-fatal
+            (void)add_message(agent, text);
             VegaString* result = vega_string_from_cstr(text);
             free(text);
             return result;
         }
 
+        trace_error(agent->agent_id, "No response from API");
         return vega_string_from_cstr("Error: No response from API");
     }
 
@@ -563,4 +742,380 @@ void agent_clear_history(VegaAgent* agent) {
         free(agent->messages[i]);
     }
     agent->message_count = 0;
+}
+
+// ============================================================================
+// Async Message API
+// ============================================================================
+
+bool agent_start_message_async(VegaVM* vm, VegaAgent* agent, const char* message) {
+    if (!agent || !agent->is_valid) {
+        trace_error(0, "Invalid agent");
+        return false;
+    }
+
+    if (!vm->api_key) {
+        trace_error(agent->agent_id, "ANTHROPIC_API_KEY not set");
+        return false;
+    }
+
+    // Can't start a new request if one is pending
+    if (agent->pending_request) {
+        trace_error(agent->agent_id, "Agent already has pending request");
+        return false;
+    }
+
+    // Emit trace for message send
+    trace_msg_send(agent->agent_id, agent->name, message);
+
+    // Add user message to history
+    if (!add_message(agent, message)) {
+        trace_error(agent->agent_id, "Out of memory adding message to history");
+        return false;
+    }
+
+    // Build tool definitions if agent has tools
+    ToolDefinition* tool_defs = NULL;
+    if (agent->tool_count > 0) {
+        tool_defs = calloc(agent->tool_count, sizeof(ToolDefinition));
+        for (uint32_t i = 0; i < agent->tool_count; i++) {
+            tool_defs[i].name = agent->tools[i].name;
+            tool_defs[i].description = agent->tools[i].description ?
+                agent->tools[i].description : "A tool function";
+            tool_defs[i].param_names = agent->tools[i].param_names;
+            tool_defs[i].param_types = agent->tools[i].param_types;
+            tool_defs[i].param_count = agent->tools[i].param_count;
+        }
+    }
+
+    // Start async request
+    HttpAsyncRequest* req;
+    if (tool_defs && agent->tool_count > 0) {
+        req = http_async_send_with_tools(
+            vm->api_key,
+            agent->model,
+            agent->system_prompt,
+            (const char**)agent->messages,
+            (int)agent->message_count,
+            tool_defs,
+            (int)agent->tool_count,
+            agent->temperature
+        );
+    } else {
+        req = http_async_send_messages(
+            vm->api_key,
+            agent->model,
+            agent->system_prompt,
+            (const char**)agent->messages,
+            (int)agent->message_count,
+            agent->temperature
+        );
+    }
+
+    free(tool_defs);
+
+    if (!req) {
+        trace_error(agent->agent_id, "Failed to start async request");
+        return false;
+    }
+
+    agent->pending_request = req;
+    agent->async_state = AGENT_ASYNC_WAITING;
+    agent->tool_ctx.iteration = 0;
+    return true;
+}
+
+int agent_poll_message(VegaAgent* agent) {
+    if (!agent) return -1;
+
+    // Check async state
+    if (agent->async_state == AGENT_ASYNC_IDLE) {
+        return -1;  // No active request
+    }
+
+    if (!agent->pending_request) {
+        return -1;  // Error - bad state
+    }
+
+    HttpAsyncStatus status = http_async_poll(agent->pending_request);
+    switch (status) {
+        case HTTP_ASYNC_PENDING:
+            return 0;  // Still pending
+        case HTTP_ASYNC_COMPLETE:
+            return 1;  // HTTP complete - caller should get result
+        case HTTP_ASYNC_ERROR:
+        default:
+            return -1; // Error
+    }
+}
+
+// Helper to extract assistant content array from response body
+static char* extract_assistant_content(const char* body) {
+    const char* content_start = strstr(body, "\"content\":");
+    if (!content_start) return NULL;
+
+    content_start += 10;
+    while (*content_start == ' ' || *content_start == '\t' || *content_start == '\n') content_start++;
+
+    if (*content_start != '[') return NULL;
+
+    const char* content_end = content_start + 1;
+    int depth = 1;
+    while (*content_end && depth > 0) {
+        if (*content_end == '[') depth++;
+        else if (*content_end == ']') depth--;
+        else if (*content_end == '"') {
+            content_end++;
+            while (*content_end && *content_end != '"') {
+                if (*content_end == '\\' && *(content_end + 1)) content_end++;
+                content_end++;
+            }
+        }
+        if (*content_end) content_end++;
+    }
+    return strndup(content_start, content_end - content_start);
+}
+
+// Helper to build tool definitions array
+static ToolDefinition* build_tool_defs(VegaAgent* agent) {
+    if (agent->tool_count == 0) return NULL;
+
+    ToolDefinition* tool_defs = calloc(agent->tool_count, sizeof(ToolDefinition));
+    for (uint32_t i = 0; i < agent->tool_count; i++) {
+        tool_defs[i].name = agent->tools[i].name;
+        tool_defs[i].description = agent->tools[i].description ?
+            agent->tools[i].description : "A tool function";
+        tool_defs[i].param_names = agent->tools[i].param_names;
+        tool_defs[i].param_types = agent->tools[i].param_types;
+        tool_defs[i].param_count = agent->tools[i].param_count;
+    }
+    return tool_defs;
+}
+
+VegaString* agent_get_message_result(VegaVM* vm, VegaAgent* agent) {
+    if (!agent || !agent->pending_request) {
+        agent->async_state = AGENT_ASYNC_IDLE;
+        return vega_string_from_cstr("Error: No pending request");
+    }
+
+    // Get the response
+    HttpResponse* resp = http_async_get_response(agent->pending_request);
+    agent->pending_request = NULL;  // Request is consumed
+
+    if (!resp) {
+        agent->async_state = AGENT_ASYNC_IDLE;
+        clear_tool_context(&agent->tool_ctx);
+        trace_error(agent->agent_id, "Failed to get async response");
+        return vega_string_from_cstr("Error: Failed to get response");
+    }
+
+    // Track token usage for budget
+    vm_add_token_usage(vm, resp->tokens.input_tokens, resp->tokens.output_tokens);
+
+    // Check budget limits
+    if (vm_budget_exceeded(vm)) {
+        char error_buf[256];
+        snprintf(error_buf, sizeof(error_buf),
+                "Error: Budget exceeded (in: %llu, out: %llu, cost: $%.4f)",
+                (unsigned long long)vm->budget_used_input_tokens,
+                (unsigned long long)vm->budget_used_output_tokens,
+                vm->budget_used_cost_usd);
+        VegaString* result = vega_string_from_cstr(error_buf);
+        http_response_free(resp);
+        agent->async_state = AGENT_ASYNC_IDLE;
+        clear_tool_context(&agent->tool_ctx);
+        trace_error(agent->agent_id, "Budget exceeded");
+        return result;
+    }
+
+    // Check for errors and handle retry with supervision
+    ErrorType err_type = classify_error(resp->status_code, resp->body);
+
+    if (resp->error || err_type != ERROR_NONE) {
+        // Record failure for circuit breaker
+        if (agent->process) {
+            process_record_failure(agent->process);
+        }
+
+        // Check if retriable and supervised
+        if (err_type == ERROR_RETRIABLE && agent->process) {
+            // Check circuit breaker
+            if (!process_circuit_allows(agent->process)) {
+                char error_buf[256];
+                snprintf(error_buf, sizeof(error_buf),
+                        "Error: Circuit breaker open - too many failures");
+                VegaString* result = vega_string_from_cstr(error_buf);
+                http_response_free(resp);
+                agent->async_state = AGENT_ASYNC_IDLE;
+                clear_tool_context(&agent->tool_ctx);
+                trace_error(agent->agent_id, "Circuit breaker open");
+                return result;
+            }
+
+            // Schedule retry with backoff
+            int32_t delay = process_schedule_retry(agent->process);
+            if (delay >= 0) {
+                // Log retry attempt
+                fprintf(stderr, "[supervision] Agent %s: retriable error (status %d), "
+                        "retrying in %d ms (attempt %u/%u)\n",
+                        agent->name, resp->status_code, delay,
+                        agent->process->supervision.restart_count + 1,
+                        agent->process->supervision.max_restarts);
+
+                // Wait for backoff delay (this is blocking but necessary for retry)
+                if (delay > 0) {
+                    usleep(delay * 1000);
+                }
+
+                // Increment retry count
+                agent->process->supervision.restart_count++;
+
+                // Restart the request - rebuild and send again
+                ToolDefinition* tool_defs = build_tool_defs(agent);
+                HttpAsyncRequest* retry_req;
+
+                if (tool_defs && agent->tool_count > 0) {
+                    retry_req = http_async_send_with_tools(
+                        vm->api_key, agent->model, agent->system_prompt,
+                        (const char**)agent->messages, (int)agent->message_count,
+                        tool_defs, (int)agent->tool_count, agent->temperature
+                    );
+                } else {
+                    retry_req = http_async_send_messages(
+                        vm->api_key, agent->model, agent->system_prompt,
+                        (const char**)agent->messages, (int)agent->message_count,
+                        agent->temperature
+                    );
+                }
+                free(tool_defs);
+                http_response_free(resp);
+
+                if (retry_req) {
+                    agent->pending_request = retry_req;
+                    agent->async_state = AGENT_ASYNC_WAITING;
+                    return NULL;  // Signal: retry in progress, keep polling
+                }
+            }
+        }
+
+        // No retry possible - return error
+        char error_buf[512];
+        if (resp->error) {
+            snprintf(error_buf, sizeof(error_buf), "Error: %s", resp->error);
+        } else {
+            snprintf(error_buf, sizeof(error_buf),
+                    "Error: API returned status %d", resp->status_code);
+        }
+        VegaString* result = vega_string_from_cstr(error_buf);
+        http_response_free(resp);
+        agent->async_state = AGENT_ASYNC_IDLE;
+        clear_tool_context(&agent->tool_ctx);
+        return result;
+    }
+
+    // Success - record it for circuit breaker
+    if (agent->process) {
+        process_record_success(agent->process);
+    }
+
+    // Check for tool use
+    if (resp->body && anthropic_has_tool_use(resp->body)) {
+        // Check iteration limit
+        if (agent->tool_ctx.iteration >= agent->tool_ctx.max_iterations) {
+            http_response_free(resp);
+            agent->async_state = AGENT_ASYNC_IDLE;
+            clear_tool_context(&agent->tool_ctx);
+            return vega_string_from_cstr("Error: Max tool iterations exceeded");
+        }
+
+        // Extract tool use info
+        char* tool_id = NULL;
+        char* tool_input = NULL;
+        char* tool_name = anthropic_extract_tool_use(resp->body, &tool_id, &tool_input);
+
+        if (tool_name) {
+            // Execute tool (sync - local execution is fast)
+            trace_tool_call(agent->agent_id, agent->name, tool_name, tool_input);
+            char* tool_result = execute_tool(vm, agent, tool_name, tool_input);
+            trace_tool_result(agent->agent_id, agent->name, tool_name, tool_result);
+
+            // Extract assistant content for proper API formatting
+            char* assistant_content = extract_assistant_content(resp->body);
+
+            // Build tool definitions
+            ToolDefinition* tool_defs = build_tool_defs(agent);
+
+            // Start ASYNC request for tool result (not sync!)
+            HttpAsyncRequest* req = http_async_send_tool_result_v2(
+                vm->api_key,
+                agent->model,
+                agent->system_prompt,
+                (const char**)agent->messages,
+                (int)agent->message_count,
+                assistant_content,
+                tool_id,
+                tool_result,
+                tool_defs,
+                (int)agent->tool_count,
+                agent->temperature
+            );
+
+            // Clean up
+            free(assistant_content);
+            free(tool_id);
+            free(tool_name);
+            free(tool_input);
+            free(tool_result);
+            free(tool_defs);
+            http_response_free(resp);
+
+            if (req) {
+                // Continue async loop
+                agent->pending_request = req;
+                agent->async_state = AGENT_ASYNC_WAITING;
+                agent->tool_ctx.iteration++;
+                return NULL;  // Signal: still processing, keep polling
+            } else {
+                // Failed to start follow-up request
+                agent->async_state = AGENT_ASYNC_IDLE;
+                clear_tool_context(&agent->tool_ctx);
+                return vega_string_from_cstr("Error: Failed to send tool result");
+            }
+        }
+    }
+
+    // No tool use - extract final text response
+    char* text = anthropic_extract_text(resp->body);
+    http_response_free(resp);
+
+    // Reset state
+    agent->async_state = AGENT_ASYNC_IDLE;
+    clear_tool_context(&agent->tool_ctx);
+
+    if (text) {
+        trace_msg_recv(agent->agent_id, agent->name, text, &(TokenUsage){0}, 0);
+        // Best effort - history add failure is non-fatal
+        (void)add_message(agent, text);
+        VegaString* result = vega_string_from_cstr(text);
+        free(text);
+        return result;
+    }
+
+    trace_error(agent->agent_id, "No response from API");
+    return vega_string_from_cstr("Error: No response from API");
+}
+
+bool agent_has_pending_request(VegaAgent* agent) {
+    return agent && agent->async_state != AGENT_ASYNC_IDLE;
+}
+
+void agent_cancel_pending(VegaAgent* agent) {
+    if (!agent) return;
+
+    if (agent->pending_request) {
+        http_async_cancel(agent->pending_request);
+        agent->pending_request = NULL;
+    }
+    agent->async_state = AGENT_ASYNC_IDLE;
+    clear_tool_context(&agent->tool_ctx);
 }

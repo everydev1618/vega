@@ -406,8 +406,9 @@ static AstExpr* parse_binary(Parser* parser, AstExpr* left) {
 
 static AstExpr* parse_message(Parser* parser, AstExpr* left) {
     SourceLoc loc = parser->previous.loc;
+    bool is_async = (parser->previous.type == TOK_MSG_ASYNC);
     AstExpr* message = parse_expression(parser);
-    return ast_message(left, message, loc);
+    return ast_message(left, message, is_async, loc);
 }
 
 static AstExpr* parse_call(Parser* parser, AstExpr* callee) {
@@ -542,7 +543,8 @@ static AstExpr* parse_prefix(Parser* parser) {
 
 static Precedence get_infix_precedence(TokenType type) {
     switch (type) {
-        case TOK_MSG:      return PREC_MESSAGE;
+        case TOK_MSG:
+        case TOK_MSG_ASYNC: return PREC_MESSAGE;
         case TOK_OR:       return PREC_OR;
         case TOK_AND:      return PREC_AND;
         case TOK_EQEQ:
@@ -566,7 +568,8 @@ static Precedence get_infix_precedence(TokenType type) {
 
 static AstExpr* parse_infix(Parser* parser, AstExpr* left) {
     switch (parser->previous.type) {
-        case TOK_MSG:        return parse_message(parser, left);
+        case TOK_MSG:
+        case TOK_MSG_ASYNC:  return parse_message(parser, left);
         case TOK_PLUS:
         case TOK_MINUS:
         case TOK_STAR:

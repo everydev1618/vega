@@ -31,6 +31,7 @@ typedef enum {
     OBJ_AGENT   = 0x03,
     OBJ_RESULT  = 0x04,
     OBJ_MAP     = 0x05,
+    OBJ_FUTURE  = 0x06,
 } VegaObjType;
 
 // Object flags

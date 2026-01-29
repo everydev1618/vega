@@ -1,8 +1,61 @@
 #include "http.h"
+#include "../tui/trace.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/time.h>
+
+// Helper to get current time in milliseconds
+static uint64_t http_get_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+// Parse token usage from API response (populates HttpTokenUsage)
+static HttpTokenUsage parse_token_usage(const char* response) {
+    HttpTokenUsage usage = {0};
+    if (!response) return usage;
+
+    // Look for "usage" object
+    const char* usage_pos = strstr(response, "\"usage\"");
+    if (!usage_pos) return usage;
+
+    // Extract input_tokens
+    const char* input_pos = strstr(usage_pos, "\"input_tokens\":");
+    if (input_pos) {
+        input_pos += 15;
+        while (*input_pos == ' ') input_pos++;
+        usage.input_tokens = (uint32_t)strtoul(input_pos, NULL, 10);
+    }
+
+    // Extract output_tokens
+    const char* output_pos = strstr(usage_pos, "\"output_tokens\":");
+    if (output_pos) {
+        output_pos += 16;
+        while (*output_pos == ' ') output_pos++;
+        usage.output_tokens = (uint32_t)strtoul(output_pos, NULL, 10);
+    }
+
+    // Extract cache_read_input_tokens (if present)
+    const char* cache_read_pos = strstr(usage_pos, "\"cache_read_input_tokens\":");
+    if (cache_read_pos) {
+        cache_read_pos += 26;
+        while (*cache_read_pos == ' ') cache_read_pos++;
+        usage.cache_read_tokens = (uint32_t)strtoul(cache_read_pos, NULL, 10);
+    }
+
+    // Extract cache_creation_input_tokens (if present)
+    const char* cache_write_pos = strstr(usage_pos, "\"cache_creation_input_tokens\":");
+    if (cache_write_pos) {
+        cache_write_pos += 30;
+        while (*cache_write_pos == ' ') cache_write_pos++;
+        usage.cache_write_tokens = (uint32_t)strtoul(cache_write_pos, NULL, 10);
+    }
+
+    return usage;
+}
 
 // ============================================================================
 // CURL Helpers
@@ -93,6 +146,10 @@ HttpResponse* anthropic_send_messages(
     int message_count,
     double temperature
 ) {
+    // Emit trace event for HTTP start
+    trace_http_start("https://api.anthropic.com/v1/messages", "POST");
+    uint64_t start_time = http_get_time_ms();
+
     HttpResponse* resp = calloc(1, sizeof(HttpResponse));
     if (!resp) return NULL;
 
@@ -137,7 +194,15 @@ HttpResponse* anthropic_send_messages(
         size_t needed = strlen(escaped_content) + 100;
         if (offset + needed >= body_capacity) {
             body_capacity = body_capacity * 2 + needed;
-            body = realloc(body, body_capacity);
+            char* new_body = realloc(body, body_capacity);
+            if (!new_body) {
+                free(escaped_content);
+                free(body);
+                curl_easy_cleanup(curl);
+                resp->error = strdup("Out of memory building request");
+                return resp;
+            }
+            body = new_body;
         }
 
         offset += snprintf(body + offset, body_capacity - offset,
@@ -168,17 +233,24 @@ HttpResponse* anthropic_send_messages(
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
     // Perform request
     CURLcode res = curl_easy_perform(curl);
+    uint64_t duration = http_get_time_ms() - start_time;
 
     if (res != CURLE_OK) {
         resp->error = strdup(curl_easy_strerror(res));
+        trace_http_done(0, duration, NULL, resp->error);
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
         resp->body = response_buf.data;
         resp->body_len = response_buf.size;
+
+        // Parse and trace token usage
+        resp->tokens = parse_token_usage(resp->body);
+        trace_http_done(resp->status_code, duration, (TokenUsage*)&resp->tokens,
+                       resp->status_code >= 400 ? resp->body : NULL);
     }
 
     curl_slist_free_all(headers);
@@ -259,6 +331,7 @@ char* anthropic_extract_text(const char* json_response) {
                 }
                 size_t len = end - pos;
                 char* result = malloc(len + 20);
+                if (!result) return NULL;
                 snprintf(result, len + 20, "API Error: %.*s", (int)len, pos);
                 return result;
             }
@@ -323,6 +396,10 @@ bool anthropic_has_tool_use(const char* json_response) {
 char* anthropic_extract_tool_use(const char* json_response, char** tool_id, char** input_json) {
     if (!json_response) return NULL;
 
+    // Initialize output params
+    if (tool_id) *tool_id = NULL;
+    if (input_json) *input_json = NULL;
+
     // Find tool_use block
     const char* tool_use = strstr(json_response, "\"type\": \"tool_use\"");
     if (!tool_use) tool_use = strstr(json_response, "\"type\":\"tool_use\"");
@@ -340,21 +417,25 @@ char* anthropic_extract_tool_use(const char* json_response, char** tool_id, char
         }
     }
 
+    char* local_tool_id = NULL;
+    char* tool_name = NULL;
+    char* local_input_json = NULL;
+
     // Extract "id" field
     const char* id_key = strstr(obj_start, "\"id\":");
-    if (id_key && tool_id) {
+    if (id_key) {
         id_key += 5;
         while (*id_key == ' ' || *id_key == '\t') id_key++;
         if (*id_key == '"') {
             id_key++;
             const char* id_end = id_key;
             while (*id_end && *id_end != '"') id_end++;
-            *tool_id = strndup(id_key, id_end - id_key);
+            local_tool_id = strndup(id_key, id_end - id_key);
+            if (!local_tool_id) goto fail;
         }
     }
 
     // Extract "name" field
-    char* tool_name = NULL;
     const char* name_key = strstr(obj_start, "\"name\":");
     if (name_key) {
         name_key += 7;
@@ -364,12 +445,13 @@ char* anthropic_extract_tool_use(const char* json_response, char** tool_id, char
             const char* name_end = name_key;
             while (*name_end && *name_end != '"') name_end++;
             tool_name = strndup(name_key, name_end - name_key);
+            if (!tool_name) goto fail;
         }
     }
 
     // Extract "input" field (as raw JSON)
     const char* input_key = strstr(obj_start, "\"input\":");
-    if (input_key && input_json) {
+    if (input_key) {
         input_key += 8;
         while (*input_key == ' ' || *input_key == '\t' || *input_key == '\n') input_key++;
         if (*input_key == '{') {
@@ -389,11 +471,25 @@ char* anthropic_extract_tool_use(const char* json_response, char** tool_id, char
                 }
                 input_end++;
             }
-            *input_json = strndup(input_key, input_end - input_key);
+            local_input_json = strndup(input_key, input_end - input_key);
+            if (!local_input_json) goto fail;
         }
     }
 
+    // Success - transfer ownership to caller
+    if (tool_id) *tool_id = local_tool_id;
+    else free(local_tool_id);
+
+    if (input_json) *input_json = local_input_json;
+    else free(local_input_json);
+
     return tool_name;
+
+fail:
+    free(local_tool_id);
+    free(tool_name);
+    free(local_input_json);
+    return NULL;
 }
 
 HttpResponse* anthropic_send_with_tools(
@@ -406,6 +502,9 @@ HttpResponse* anthropic_send_with_tools(
     int tool_count,
     double temperature
 ) {
+    trace_http_start("https://api.anthropic.com/v1/messages", "POST");
+    uint64_t start_time = http_get_time_ms();
+
     HttpResponse* resp = calloc(1, sizeof(HttpResponse));
     if (!resp) return NULL;
 
@@ -450,7 +549,15 @@ HttpResponse* anthropic_send_with_tools(
         size_t needed = strlen(escaped_content) + 100;
         if (offset + needed >= body_capacity) {
             body_capacity = body_capacity * 2 + needed;
-            body = realloc(body, body_capacity);
+            char* new_body = realloc(body, body_capacity);
+            if (!new_body) {
+                free(escaped_content);
+                free(body);
+                curl_easy_cleanup(curl);
+                resp->error = strdup("Out of memory building request");
+                return resp;
+            }
+            body = new_body;
         }
 
         offset += snprintf(body + offset, body_capacity - offset,
@@ -472,7 +579,14 @@ HttpResponse* anthropic_send_with_tools(
         for (int t = 0; t < tool_count; t++) {
             if (offset + 1024 >= (int)body_capacity) {
                 body_capacity *= 2;
-                body = realloc(body, body_capacity);
+                char* new_body = realloc(body, body_capacity);
+                if (!new_body) {
+                    free(body);
+                    curl_easy_cleanup(curl);
+                    resp->error = strdup("Out of memory building request");
+                    return resp;
+                }
+                body = new_body;
             }
 
             char* escaped_name = json_escape_string(tools[t].name);
@@ -538,16 +652,22 @@ HttpResponse* anthropic_send_with_tools(
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
     CURLcode res = curl_easy_perform(curl);
+    uint64_t duration = http_get_time_ms() - start_time;
 
     if (res != CURLE_OK) {
         resp->error = strdup(curl_easy_strerror(res));
+        trace_http_done(0, duration, NULL, resp->error);
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
         resp->body = response_buf.data;
         resp->body_len = response_buf.size;
+
+        resp->tokens = parse_token_usage(resp->body);
+        trace_http_done(resp->status_code, duration, (TokenUsage*)&resp->tokens,
+                       resp->status_code >= 400 ? resp->body : NULL);
     }
 
     curl_slist_free_all(headers);
@@ -569,6 +689,9 @@ HttpResponse* anthropic_send_tool_result(
     int tool_count,
     double temperature
 ) {
+    trace_http_start("https://api.anthropic.com/v1/messages", "POST");
+    uint64_t start_time = http_get_time_ms();
+
     HttpResponse* resp = calloc(1, sizeof(HttpResponse));
     if (!resp) return NULL;
 
@@ -607,7 +730,15 @@ HttpResponse* anthropic_send_tool_result(
         size_t needed = strlen(escaped_content) + 100;
         if (offset + needed >= body_capacity) {
             body_capacity = body_capacity * 2 + needed;
-            body = realloc(body, body_capacity);
+            char* new_body = realloc(body, body_capacity);
+            if (!new_body) {
+                free(escaped_content);
+                free(body);
+                curl_easy_cleanup(curl);
+                resp->error = strdup("Out of memory building request");
+                return resp;
+            }
+            body = new_body;
         }
 
         offset += snprintf(body + offset, body_capacity - offset,
@@ -625,7 +756,15 @@ HttpResponse* anthropic_send_tool_result(
     size_t needed = strlen(escaped_result) + strlen(tool_use_id) + 200;
     if (offset + needed >= body_capacity) {
         body_capacity = body_capacity * 2 + needed;
-        body = realloc(body, body_capacity);
+        char* new_body = realloc(body, body_capacity);
+        if (!new_body) {
+            free(escaped_result);
+            free(body);
+            curl_easy_cleanup(curl);
+            resp->error = strdup("Out of memory building request");
+            return resp;
+        }
+        body = new_body;
     }
 
     offset += snprintf(body + offset, body_capacity - offset,
@@ -643,7 +782,14 @@ HttpResponse* anthropic_send_tool_result(
         for (int t = 0; t < tool_count; t++) {
             if (offset + 1024 >= (int)body_capacity) {
                 body_capacity *= 2;
-                body = realloc(body, body_capacity);
+                char* new_body = realloc(body, body_capacity);
+                if (!new_body) {
+                    free(body);
+                    curl_easy_cleanup(curl);
+                    resp->error = strdup("Out of memory building request");
+                    return resp;
+                }
+                body = new_body;
             }
 
             char* escaped_name = json_escape_string(tools[t].name);
@@ -705,16 +851,22 @@ HttpResponse* anthropic_send_tool_result(
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
     CURLcode res = curl_easy_perform(curl);
+    uint64_t duration = http_get_time_ms() - start_time;
 
     if (res != CURLE_OK) {
         resp->error = strdup(curl_easy_strerror(res));
+        trace_http_done(0, duration, NULL, resp->error);
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
         resp->body = response_buf.data;
         resp->body_len = response_buf.size;
+
+        resp->tokens = parse_token_usage(resp->body);
+        trace_http_done(resp->status_code, duration, (TokenUsage*)&resp->tokens,
+                       resp->status_code >= 400 ? resp->body : NULL);
     }
 
     curl_slist_free_all(headers);
@@ -737,6 +889,9 @@ HttpResponse* anthropic_send_tool_result_v2(
     int tool_count,
     double temperature
 ) {
+    trace_http_start("https://api.anthropic.com/v1/messages", "POST");
+    uint64_t start_time = http_get_time_ms();
+
     HttpResponse* resp = calloc(1, sizeof(HttpResponse));
     if (!resp) return NULL;
 
@@ -766,7 +921,15 @@ HttpResponse* anthropic_send_tool_result_v2(
         size_t needed = strlen(escaped_content) + 100;
         if (offset + needed >= body_capacity) {
             body_capacity = body_capacity * 2 + needed;
-            body = realloc(body, body_capacity);
+            char* new_body = realloc(body, body_capacity);
+            if (!new_body) {
+                free(escaped_content);
+                free(body);
+                curl_easy_cleanup(curl);
+                resp->error = strdup("Out of memory building request");
+                return resp;
+            }
+            body = new_body;
         }
         offset += snprintf(body + offset, body_capacity - offset,
             "%s{\"role\": \"%s\", \"content\": \"%s\"}",
@@ -778,7 +941,14 @@ HttpResponse* anthropic_send_tool_result_v2(
         size_t needed = strlen(assistant_content) + 100;
         if (offset + needed >= body_capacity) {
             body_capacity = body_capacity * 2 + needed;
-            body = realloc(body, body_capacity);
+            char* new_body = realloc(body, body_capacity);
+            if (!new_body) {
+                free(body);
+                curl_easy_cleanup(curl);
+                resp->error = strdup("Out of memory building request");
+                return resp;
+            }
+            body = new_body;
         }
         offset += snprintf(body + offset, body_capacity - offset,
             ",{\"role\": \"assistant\", \"content\": %s}", assistant_content);
@@ -788,7 +958,15 @@ HttpResponse* anthropic_send_tool_result_v2(
     size_t needed = strlen(escaped_result) + strlen(tool_use_id) + 200;
     if (offset + needed >= body_capacity) {
         body_capacity = body_capacity * 2 + needed;
-        body = realloc(body, body_capacity);
+        char* new_body = realloc(body, body_capacity);
+        if (!new_body) {
+            free(escaped_result);
+            free(body);
+            curl_easy_cleanup(curl);
+            resp->error = strdup("Out of memory building request");
+            return resp;
+        }
+        body = new_body;
     }
     offset += snprintf(body + offset, body_capacity - offset,
         ",{\"role\": \"user\", \"content\": [{\"type\": \"tool_result\", \"tool_use_id\": \"%s\", \"content\": \"%s\"}]}]",
@@ -800,7 +978,14 @@ HttpResponse* anthropic_send_tool_result_v2(
         for (int t = 0; t < tool_count; t++) {
             if (offset + 1024 >= (int)body_capacity) {
                 body_capacity *= 2;
-                body = realloc(body, body_capacity);
+                char* new_body = realloc(body, body_capacity);
+                if (!new_body) {
+                    free(body);
+                    curl_easy_cleanup(curl);
+                    resp->error = strdup("Out of memory building request");
+                    return resp;
+                }
+                body = new_body;
             }
             char* escaped_name = json_escape_string(tools[t].name);
             char* escaped_desc = json_escape_string(tools[t].description ? tools[t].description : "");
@@ -846,16 +1031,22 @@ HttpResponse* anthropic_send_tool_result_v2(
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
     CURLcode res = curl_easy_perform(curl);
+    uint64_t duration = http_get_time_ms() - start_time;
 
     if (res != CURLE_OK) {
         resp->error = strdup(curl_easy_strerror(res));
+        trace_http_done(0, duration, NULL, resp->error);
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp->status_code);
         resp->body = response_buf.data;
         resp->body_len = response_buf.size;
+
+        resp->tokens = parse_token_usage(resp->body);
+        trace_http_done(resp->status_code, duration, (TokenUsage*)&resp->tokens,
+                       resp->status_code >= 400 ? resp->body : NULL);
     }
 
     curl_slist_free_all(headers);
@@ -863,4 +1054,320 @@ HttpResponse* anthropic_send_tool_result_v2(
     free(body);
 
     return resp;
+}
+
+// ============================================================================
+// Async HTTP Implementation
+// ============================================================================
+
+static char* strdup_safe(const char* s) {
+    return s ? strdup(s) : NULL;
+}
+
+static char** copy_messages(const char** messages, int count) {
+    if (!messages || count <= 0) return NULL;
+    char** copy = malloc(count * sizeof(char*));
+    if (!copy) return NULL;
+    for (int i = 0; i < count; i++) {
+        if (messages[i]) {
+            copy[i] = strdup(messages[i]);
+            if (!copy[i]) {
+                // Allocation failed - clean up and return NULL
+                for (int j = 0; j < i; j++) {
+                    free(copy[j]);
+                }
+                free(copy);
+                return NULL;
+            }
+        } else {
+            copy[i] = NULL;
+        }
+    }
+    return copy;
+}
+
+static void free_messages_copy(char** messages, int count) {
+    if (!messages) return;
+    for (int i = 0; i < count; i++) {
+        free(messages[i]);
+    }
+    free(messages);
+}
+
+// Forward declaration for cleanup on failure
+static void free_tools_copy(ToolDefinition* tools, int count);
+
+static ToolDefinition* copy_tools(ToolDefinition* tools, int count) {
+    if (!tools || count <= 0) return NULL;
+
+    ToolDefinition* copy = calloc(count, sizeof(ToolDefinition));
+    if (!copy) return NULL;
+
+    for (int i = 0; i < count; i++) {
+        // Copy name (required)
+        if (tools[i].name) {
+            copy[i].name = strdup(tools[i].name);
+            if (!copy[i].name) goto fail;
+        }
+
+        // Copy description (optional)
+        if (tools[i].description) {
+            copy[i].description = strdup(tools[i].description);
+            if (!copy[i].description) goto fail;
+        }
+
+        copy[i].param_count = tools[i].param_count;
+
+        if (tools[i].param_count > 0) {
+            copy[i].param_names = calloc(tools[i].param_count, sizeof(char*));
+            copy[i].param_types = calloc(tools[i].param_count, sizeof(char*));
+            if (!copy[i].param_names || !copy[i].param_types) goto fail;
+
+            for (int j = 0; j < tools[i].param_count; j++) {
+                if (tools[i].param_names[j]) {
+                    copy[i].param_names[j] = strdup(tools[i].param_names[j]);
+                    if (!copy[i].param_names[j]) goto fail;
+                }
+                if (tools[i].param_types[j]) {
+                    copy[i].param_types[j] = strdup(tools[i].param_types[j]);
+                    if (!copy[i].param_types[j]) goto fail;
+                }
+            }
+        }
+    }
+    return copy;
+
+fail:
+    free_tools_copy(copy, count);
+    return NULL;
+}
+
+static void free_tools_copy(ToolDefinition* tools, int count) {
+    if (!tools) return;
+    for (int i = 0; i < count; i++) {
+        free((char*)tools[i].name);
+        free((char*)tools[i].description);
+        for (int j = 0; j < tools[i].param_count; j++) {
+            free((char*)tools[i].param_names[j]);
+            free((char*)tools[i].param_types[j]);
+        }
+        free(tools[i].param_names);
+        free(tools[i].param_types);
+    }
+    free(tools);
+}
+
+static void* async_thread_func(void* arg) {
+    HttpAsyncRequest* req = (HttpAsyncRequest*)arg;
+    HttpResponse* response = NULL;
+
+    switch (req->type) {
+        case HTTP_REQ_MESSAGES:
+            response = anthropic_send_messages(
+                req->api_key, req->model, req->system_prompt,
+                (const char**)req->messages, req->message_count,
+                req->temperature
+            );
+            break;
+
+        case HTTP_REQ_WITH_TOOLS:
+            response = anthropic_send_with_tools(
+                req->api_key, req->model, req->system_prompt,
+                (const char**)req->messages, req->message_count,
+                req->tools, req->tool_count, req->temperature
+            );
+            break;
+
+        case HTTP_REQ_TOOL_RESULT_V2:
+            response = anthropic_send_tool_result_v2(
+                req->api_key, req->model, req->system_prompt,
+                (const char**)req->messages, req->message_count,
+                req->assistant_content, req->tool_use_id, req->tool_result,
+                req->tools, req->tool_count, req->temperature
+            );
+            break;
+    }
+
+    pthread_mutex_lock(&req->mutex);
+    req->response = response;
+    req->status = response ? HTTP_ASYNC_COMPLETE : HTTP_ASYNC_ERROR;
+    pthread_mutex_unlock(&req->mutex);
+
+    return NULL;
+}
+
+static HttpAsyncRequest* create_async_request(void) {
+    HttpAsyncRequest* req = calloc(1, sizeof(HttpAsyncRequest));
+    if (!req) return NULL;
+    if (pthread_mutex_init(&req->mutex, NULL) != 0) {
+        free(req);
+        return NULL;
+    }
+    req->status = HTTP_ASYNC_PENDING;
+    req->thread_started = false;
+    return req;
+}
+
+HttpAsyncRequest* http_async_send_messages(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    double temperature
+) {
+    HttpAsyncRequest* req = create_async_request();
+    if (!req) return NULL;
+
+    req->type = HTTP_REQ_MESSAGES;
+    req->api_key = strdup_safe(api_key);
+    req->model = strdup_safe(model);
+    req->system_prompt = strdup_safe(system_prompt);
+    req->messages = copy_messages(messages, message_count);
+    req->message_count = message_count;
+    req->temperature = temperature;
+
+    if (pthread_create(&req->thread, NULL, async_thread_func, req) != 0) {
+        http_async_cancel(req);
+        return NULL;
+    }
+    req->thread_started = true;
+
+    return req;
+}
+
+HttpAsyncRequest* http_async_send_with_tools(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+) {
+    HttpAsyncRequest* req = create_async_request();
+    if (!req) return NULL;
+
+    req->type = HTTP_REQ_WITH_TOOLS;
+    req->api_key = strdup_safe(api_key);
+    req->model = strdup_safe(model);
+    req->system_prompt = strdup_safe(system_prompt);
+    req->messages = copy_messages(messages, message_count);
+    req->message_count = message_count;
+    req->tools = copy_tools(tools, tool_count);
+    req->tool_count = tool_count;
+    req->temperature = temperature;
+
+    if (pthread_create(&req->thread, NULL, async_thread_func, req) != 0) {
+        http_async_cancel(req);
+        return NULL;
+    }
+    req->thread_started = true;
+
+    return req;
+}
+
+HttpAsyncRequest* http_async_send_tool_result_v2(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    const char* assistant_content,
+    const char* tool_use_id,
+    const char* tool_result,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+) {
+    HttpAsyncRequest* req = create_async_request();
+    if (!req) return NULL;
+
+    req->type = HTTP_REQ_TOOL_RESULT_V2;
+    req->api_key = strdup_safe(api_key);
+    req->model = strdup_safe(model);
+    req->system_prompt = strdup_safe(system_prompt);
+    req->messages = copy_messages(messages, message_count);
+    req->message_count = message_count;
+    req->assistant_content = strdup_safe(assistant_content);
+    req->tool_use_id = strdup_safe(tool_use_id);
+    req->tool_result = strdup_safe(tool_result);
+    req->tools = copy_tools(tools, tool_count);
+    req->tool_count = tool_count;
+    req->temperature = temperature;
+
+    if (pthread_create(&req->thread, NULL, async_thread_func, req) != 0) {
+        http_async_cancel(req);
+        return NULL;
+    }
+    req->thread_started = true;
+
+    return req;
+}
+
+HttpAsyncStatus http_async_poll(HttpAsyncRequest* req) {
+    if (!req) return HTTP_ASYNC_ERROR;
+
+    pthread_mutex_lock(&req->mutex);
+    HttpAsyncStatus status = req->status;
+    pthread_mutex_unlock(&req->mutex);
+
+    return status;
+}
+
+HttpResponse* http_async_get_response(HttpAsyncRequest* req) {
+    if (!req) return NULL;
+
+    // Wait for thread to finish
+    pthread_join(req->thread, NULL);
+
+    HttpResponse* response = req->response;
+    req->response = NULL;  // Transfer ownership
+
+    // Free request resources
+    free(req->api_key);
+    free(req->model);
+    free(req->system_prompt);
+    free_messages_copy(req->messages, req->message_count);
+    free_tools_copy(req->tools, req->tool_count);
+    free(req->assistant_content);
+    free(req->tool_use_id);
+    free(req->tool_result);
+    pthread_mutex_destroy(&req->mutex);
+    free(req);
+
+    return response;
+}
+
+void http_async_cancel(HttpAsyncRequest* req) {
+    if (!req) return;
+
+    // Only join if thread was actually started
+    if (req->thread_started) {
+        // Note: We can't really cancel a running HTTP request cleanly,
+        // so we just wait for it to finish and discard the result
+        pthread_mutex_lock(&req->mutex);
+        HttpAsyncStatus status = req->status;
+        pthread_mutex_unlock(&req->mutex);
+
+        if (status == HTTP_ASYNC_PENDING) {
+            pthread_join(req->thread, NULL);
+        }
+    }
+
+    if (req->response) {
+        http_response_free(req->response);
+    }
+
+    free(req->api_key);
+    free(req->model);
+    free(req->system_prompt);
+    free_messages_copy(req->messages, req->message_count);
+    free_tools_copy(req->tools, req->tool_count);
+    free(req->assistant_content);
+    free(req->tool_use_id);
+    free(req->tool_result);
+    pthread_mutex_destroy(&req->mutex);
+    free(req);
 }

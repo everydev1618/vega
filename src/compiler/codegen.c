@@ -363,7 +363,11 @@ static void emit_expr(CodeGen* cg, AstExpr* expr) {
         case EXPR_MESSAGE:
             emit_expr(cg, expr->as.message.target);
             emit_expr(cg, expr->as.message.message);
-            emit_byte(cg, OP_SEND_MSG);
+            if (expr->as.message.is_async) {
+                emit_byte(cg, OP_SEND_ASYNC);  // Returns future
+            } else {
+                emit_byte(cg, OP_SEND_MSG);    // Blocks until response
+            }
             break;
 
         case EXPR_AWAIT:
@@ -949,6 +953,7 @@ void codegen_disassemble(CodeGen* cg, FILE* out) {
             case OP_CALL_NATIVE:  fprintf(out, "CALL_NATIVE %u\n", READ_U16(cg->code, ip)); ip += 2; break;
             case OP_SPAWN_AGENT:  fprintf(out, "SPAWN_AGENT %u\n", READ_U16(cg->code, ip)); ip += 2; break;
             case OP_SEND_MSG:     fprintf(out, "SEND_MSG\n"); break;
+            case OP_SEND_ASYNC:   fprintf(out, "SEND_ASYNC\n"); break;
             case OP_SPAWN_ASYNC:  fprintf(out, "SPAWN_ASYNC %u\n", READ_U16(cg->code, ip)); ip += 2; break;
             case OP_AWAIT:        fprintf(out, "AWAIT\n"); break;
             case OP_GET_FIELD:    fprintf(out, "GET_FIELD %u\n", READ_U16(cg->code, ip)); ip += 2; break;

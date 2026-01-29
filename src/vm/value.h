@@ -65,6 +65,25 @@ struct VegaArray {
 };
 
 // ============================================================================
+// Future Type (for async agent results)
+// ============================================================================
+
+typedef enum {
+    FUTURE_PENDING,     // Waiting for result
+    FUTURE_READY,       // Result available
+    FUTURE_ERROR,       // Error occurred
+} FutureState;
+
+// Note: VegaObjHeader is prepended by vega_obj_alloc, not part of this struct
+struct VegaFuture {
+    uint32_t request_id;    // Index into VM's pending_requests
+    FutureState state;
+    VegaAgent* agent;       // Agent handling this request
+    VegaString* result;     // Result string (NULL until ready)
+    char* error;            // Error message if state == FUTURE_ERROR
+};
+
+// ============================================================================
 // Result Type (for error handling)
 // ============================================================================
 
@@ -106,6 +125,10 @@ static inline Value value_function(uint32_t id) {
     return (Value){.type = VAL_FUNCTION, .as.function_id = id};
 }
 
+static inline Value value_future(VegaFuture* f) {
+    return (Value){.type = VAL_FUTURE, .as.future = f};
+}
+
 // ============================================================================
 // Value Operations
 // ============================================================================
@@ -118,6 +141,7 @@ static inline bool value_is_float(Value v) { return v.type == VAL_FLOAT; }
 static inline bool value_is_number(Value v) { return v.type == VAL_INT || v.type == VAL_FLOAT; }
 static inline bool value_is_string(Value v) { return v.type == VAL_STRING; }
 static inline bool value_is_agent(Value v) { return v.type == VAL_AGENT; }
+static inline bool value_is_future(Value v) { return v.type == VAL_FUTURE; }
 
 // Type coercion
 double value_as_number(Value v);
@@ -170,5 +194,15 @@ Value result_unwrap(VegaResult* r);
 Value result_unwrap_err(VegaResult* r);
 Value value_result_ok(Value value);
 Value value_result_err(Value error);
+
+// ============================================================================
+// Future Operations
+// ============================================================================
+
+VegaFuture* future_new(VegaAgent* agent, uint32_t request_id);
+void future_set_result(VegaFuture* f, VegaString* result);
+void future_set_error(VegaFuture* f, const char* error);
+bool future_is_ready(VegaFuture* f);
+VegaString* future_get_result(VegaFuture* f);
 
 #endif // VEGA_VALUE_H

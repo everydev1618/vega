@@ -3,6 +3,7 @@
 #include "http.h"
 #include "process.h"
 #include "scheduler.h"
+#include "../tui/trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,14 @@ void vm_init(VegaVM* vm) {
 }
 
 void vm_free(VegaVM* vm) {
+    // Cancel any pending async request
+    if (vm->waiting_for_agent) {
+        agent_cancel_pending(vm->waiting_for_agent);
+        vm->waiting_for_agent = NULL;
+    }
+    value_release(vm->waiting_msg);
+    vm->waiting_msg = value_null();
+
     free(vm->code);
     free(vm->constants);
     free(vm->functions);
@@ -104,6 +113,64 @@ void vm_free(VegaVM* vm) {
 
     // Cleanup scheduler
     scheduler_cleanup(&vm->scheduler);
+}
+
+// ============================================================================
+// Budget Management
+// ============================================================================
+
+// Pricing per million tokens (as of Jan 2025 for Claude Sonnet 4)
+#define PRICE_INPUT_PER_MTOK    3.00   // $3.00 per million input tokens
+#define PRICE_OUTPUT_PER_MTOK   15.00  // $15.00 per million output tokens
+#define PRICE_CACHE_READ_PER_MTOK  0.30   // $0.30 per million cache read tokens
+#define PRICE_CACHE_WRITE_PER_MTOK 3.75   // $3.75 per million cache write tokens
+
+void vm_set_budget_input_tokens(VegaVM* vm, uint64_t max_tokens) {
+    vm->budget_max_input_tokens = max_tokens;
+}
+
+void vm_set_budget_output_tokens(VegaVM* vm, uint64_t max_tokens) {
+    vm->budget_max_output_tokens = max_tokens;
+}
+
+void vm_set_budget_cost(VegaVM* vm, double max_cost_usd) {
+    vm->budget_max_cost_usd = max_cost_usd;
+}
+
+void vm_add_token_usage(VegaVM* vm, uint32_t input, uint32_t output) {
+    vm->budget_used_input_tokens += input;
+    vm->budget_used_output_tokens += output;
+
+    // Calculate cost
+    double input_cost = (input / 1000000.0) * PRICE_INPUT_PER_MTOK;
+    double output_cost = (output / 1000000.0) * PRICE_OUTPUT_PER_MTOK;
+    vm->budget_used_cost_usd += input_cost + output_cost;
+}
+
+double vm_get_current_cost(VegaVM* vm) {
+    return vm->budget_used_cost_usd;
+}
+
+bool vm_budget_exceeded(VegaVM* vm) {
+    // Check input token limit
+    if (vm->budget_max_input_tokens > 0 &&
+        vm->budget_used_input_tokens >= vm->budget_max_input_tokens) {
+        return true;
+    }
+
+    // Check output token limit
+    if (vm->budget_max_output_tokens > 0 &&
+        vm->budget_used_output_tokens >= vm->budget_max_output_tokens) {
+        return true;
+    }
+
+    // Check cost limit
+    if (vm->budget_max_cost_usd > 0.0 &&
+        vm->budget_used_cost_usd >= vm->budget_max_cost_usd) {
+        return true;
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -801,6 +868,66 @@ bool vm_step(VegaVM* vm) {
         return false;
     }
 
+    // Always poll all pending async futures first (from <~ sends)
+    // This ensures all async agents make progress even during awaits
+    for (uint32_t i = 0; i < vm->pending_count; i++) {
+        VegaFuture* future = vm->pending_futures[i];
+        if (!future || future_is_ready(future)) continue;
+
+        VegaAgent* agent = future->agent;
+        if (!agent || !agent_has_pending_request(agent)) continue;
+
+        int poll_result = agent_poll_message(agent);
+        if (poll_result == 1) {
+            // Complete - get result
+            VegaString* response = agent_get_message_result(vm, agent);
+            if (response != NULL) {
+                future_set_result(future, response);
+            }
+            // Note: if response is NULL, a tool loop started - we'll keep polling
+        } else if (poll_result == -1) {
+            // Error
+            future_set_error(future, "Async request failed");
+        }
+        // poll_result == 0 means still pending
+    }
+
+    // Check if waiting for async agent response (synchronous send or await)
+    if (vm->waiting_for_agent) {
+        VegaAgent* agent = vm->waiting_for_agent;
+        int poll_result = agent_poll_message(agent);
+        if (poll_result == 0) {
+            // Still pending - yield
+            return true;
+        } else if (poll_result == 1) {
+            // HTTP complete - clear waiting state BEFORE get_result
+            // (get_result may call execute_tool which calls vm_step)
+            vm->waiting_for_agent = NULL;
+            Value saved_msg = vm->waiting_msg;
+            vm->waiting_msg = value_null();
+
+            // Get result (may trigger another async request for tool loop)
+            VegaString* response = agent_get_message_result(vm, agent);
+            if (response == NULL) {
+                // Tool loop in progress - another async request started
+                vm->waiting_for_agent = agent;
+                vm->waiting_msg = saved_msg;
+                return true;
+            }
+            // Got final result
+            value_release(saved_msg);
+            vm_push(vm, value_string(response));
+            return true;
+        } else {
+            // Error - poll returned -1
+            vm->waiting_for_agent = NULL;
+            value_release(vm->waiting_msg);
+            vm->waiting_msg = value_null();
+            vm_push(vm, value_string(vega_string_from_cstr("Error: Async request failed")));
+            return true;
+        }
+    }
+
     uint8_t op = vm->code[vm->ip++];
 
     switch (op) {
@@ -1212,8 +1339,44 @@ bool vm_step(VegaVM* vm) {
         }
 
         case OP_AWAIT: {
-            // Await is a no-op for now since message sends are already blocking
-            // The future value is already on the stack (the result string)
+            // Await a future: block until result is ready
+            Value future_val = vm_pop(vm);
+
+            if (future_val.type != VAL_FUTURE || !future_val.as.future) {
+                snprintf(vm->error_msg, sizeof(vm->error_msg),
+                        "Cannot await non-future value");
+                vm->had_error = true;
+                vm->running = false;
+                value_release(future_val);
+                break;
+            }
+
+            VegaFuture* future = future_val.as.future;
+
+            if (future_is_ready(future)) {
+                // Already resolved - push result
+                if (future->state == FUTURE_READY) {
+                    VegaString* result = future->result;
+                    if (result) {
+                        vega_obj_retain(result);
+                        vm_push(vm, value_string(result));
+                    } else {
+                        vm_push(vm, value_null());
+                    }
+                } else {
+                    // Error state
+                    const char* err = future->error ? future->error : "Unknown error";
+                    vm_push(vm, value_string(vega_string_from_cstr(err)));
+                }
+                vega_obj_release(future);
+            } else {
+                // Not ready yet - set up blocking wait on the agent
+                // Push future back so we can retry
+                vm->ip--;  // Replay OP_AWAIT
+                vm_push(vm, future_val);  // Put future back on stack
+                vm->waiting_for_agent = future->agent;
+                // Return true to yield
+            }
             break;
         }
 
@@ -1274,20 +1437,79 @@ bool vm_step(VegaVM* vm) {
                         "Cannot send message to non-agent");
                 vm->had_error = true;
                 vm->running = false;
+                value_release(msg);
+                value_release(target);
                 break;
             }
 
+            VegaAgent* agent = target.as.agent;
             VegaString* msg_str = value_to_string(msg);
-            VegaString* response = agent_send_message(vm, target.as.agent, msg_str->data);
 
-            value_release(msg);
-            vega_obj_release(msg_str);
-
-            if (response) {
-                vm_push(vm, value_string(response));
+            // Start async request
+            if (agent_start_message_async(vm, agent, msg_str->data)) {
+                // Request started - store state and yield
+                vm->waiting_for_agent = agent;
+                vm->waiting_msg = msg;  // Keep reference for debugging
+                vega_obj_release(msg_str);
+                value_release(target);
+                // Response will be pushed when polling completes
             } else {
-                vm_push(vm, value_null());
+                // Failed to start - push error
+                value_release(msg);
+                vega_obj_release(msg_str);
+                value_release(target);
+                vm_push(vm, value_string(vega_string_from_cstr("Error: Failed to send message")));
             }
+            break;
+        }
+
+        case OP_SEND_ASYNC: {
+            // Async send: returns a future immediately instead of blocking
+            Value msg = vm_pop(vm);
+            Value target = vm_pop(vm);
+
+            if (target.type != VAL_AGENT || !target.as.agent) {
+                snprintf(vm->error_msg, sizeof(vm->error_msg),
+                        "Cannot send message to non-agent");
+                vm->had_error = true;
+                vm->running = false;
+                value_release(msg);
+                value_release(target);
+                break;
+            }
+
+            if (vm->pending_count >= VM_MAX_PENDING) {
+                snprintf(vm->error_msg, sizeof(vm->error_msg),
+                        "Too many pending async requests (max %d)", VM_MAX_PENDING);
+                vm->had_error = true;
+                vm->running = false;
+                value_release(msg);
+                value_release(target);
+                break;
+            }
+
+            VegaAgent* agent = target.as.agent;
+            VegaString* msg_str = value_to_string(msg);
+
+            // Create future for this request
+            uint32_t request_id = vm->next_request_id++;
+            VegaFuture* future = future_new(agent, request_id);
+
+            // Start async request
+            if (agent_start_message_async(vm, agent, msg_str->data)) {
+                // Request started - add to pending futures
+                vm->pending_futures[vm->pending_count++] = future;
+                // Push future onto stack immediately (non-blocking)
+                vm_push(vm, value_future(future));
+            } else {
+                // Failed to start
+                future_set_error(future, "Failed to start async request");
+                vm_push(vm, value_future(future));
+            }
+
+            vega_obj_release(msg_str);
+            value_release(msg);
+            value_release(target);
             break;
         }
 
@@ -1401,9 +1623,16 @@ bool vm_step(VegaVM* vm) {
 
         case OP_PRINT: {
             Value v = vm_pop(vm);
-            value_print(v);
-            printf("\n");
-            fflush(stdout);
+            // If tracing is enabled (TUI mode), route output through trace system
+            if (trace_is_enabled()) {
+                VegaString* str = value_to_string(v);
+                trace_print(str->data);
+                vega_obj_release(str);
+            } else {
+                value_print(v);
+                printf("\n");
+                fflush(stdout);
+            }
             value_release(v);
             // Push null as return value (for expression statement semantics)
             vm_push(vm, value_null());

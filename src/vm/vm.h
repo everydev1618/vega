@@ -18,9 +18,10 @@
 // Constants
 // ============================================================================
 
-#define VM_STACK_MAX    256
-#define VM_FRAMES_MAX   64
-#define VM_GLOBALS_MAX  256
+#define VM_STACK_MAX       256
+#define VM_FRAMES_MAX      64
+#define VM_GLOBALS_MAX     256
+#define VM_MAX_PENDING     16   // Max concurrent async agent requests
 
 // ============================================================================
 // Call Frame
@@ -76,8 +77,25 @@ typedef struct VegaVM {
     bool had_error;
     char error_msg[256];
 
+    // Async state - when waiting for agent response (sync send)
+    struct VegaAgent* waiting_for_agent;  // Agent with pending async request
+    Value waiting_msg;                     // Message being sent (for retry/debug)
+
+    // Pending async requests (for <~ async send)
+    struct VegaFuture* pending_futures[VM_MAX_PENDING];
+    uint32_t pending_count;
+    uint32_t next_request_id;
+
     // API key (from environment or ~/.vega config)
     char* api_key;
+
+    // Budget tracking
+    uint64_t budget_max_input_tokens;   // 0 = unlimited
+    uint64_t budget_max_output_tokens;  // 0 = unlimited
+    double budget_max_cost_usd;         // 0.0 = unlimited
+    uint64_t budget_used_input_tokens;
+    uint64_t budget_used_output_tokens;
+    double budget_used_cost_usd;
 
     // Process model (Phase 2)
     VegaProcess* processes[MAX_PROCESSES];
@@ -132,6 +150,14 @@ int vm_find_function(VegaVM* vm, const char* name);
 // Agent lookup
 int vm_find_agent(VegaVM* vm, const char* name);
 AgentDef* vm_get_agent(VegaVM* vm, uint32_t index);
+
+// Budget management
+void vm_set_budget_input_tokens(VegaVM* vm, uint64_t max_tokens);
+void vm_set_budget_output_tokens(VegaVM* vm, uint64_t max_tokens);
+void vm_set_budget_cost(VegaVM* vm, double max_cost_usd);
+bool vm_budget_exceeded(VegaVM* vm);
+void vm_add_token_usage(VegaVM* vm, uint32_t input, uint32_t output);
+double vm_get_current_cost(VegaVM* vm);
 
 // Debug
 void vm_print_stack(VegaVM* vm);

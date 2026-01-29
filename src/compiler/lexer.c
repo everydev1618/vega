@@ -305,6 +305,7 @@ Token lexer_next_token(Lexer* lexer) {
 
         case '<':
             if (match(lexer, '-')) return make_token(lexer, TOK_MSG);
+            if (match(lexer, '~')) return make_token(lexer, TOK_MSG_ASYNC);
             if (match(lexer, '=')) return make_token(lexer, TOK_LE);
             return make_token(lexer, TOK_LT);
 
@@ -425,6 +426,7 @@ const char* token_type_name(TokenType type) {
         case TOK_NOT:         return "NOT";
         case TOK_ARROW:       return "ARROW";
         case TOK_MSG:         return "MSG";
+        case TOK_MSG_ASYNC:   return "MSG_ASYNC";
         case TOK_DOT:         return "DOT";
         case TOK_COLON:       return "COLON";
         case TOK_COLONCOLON:  return "COLONCOLON";

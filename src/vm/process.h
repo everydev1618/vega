@@ -46,6 +46,18 @@ typedef enum {
     STRATEGY_RESTART_ALL,   // Restart all children
 } RestartStrategy;
 
+typedef enum {
+    BACKOFF_NONE,           // No backoff, restart immediately
+    BACKOFF_LINEAR,         // Linear backoff (delay * attempt)
+    BACKOFF_EXPONENTIAL,    // Exponential backoff (delay * 2^attempt)
+} BackoffStrategy;
+
+typedef enum {
+    CIRCUIT_CLOSED,         // Normal operation, allowing requests
+    CIRCUIT_OPEN,           // Failure threshold reached, blocking requests
+    CIRCUIT_HALF_OPEN,      // Testing if service recovered
+} CircuitState;
+
 // Call frame for process-local call stack
 typedef struct {
     uint32_t function_id;
@@ -60,6 +72,19 @@ typedef struct {
     uint32_t window_ms;         // Time window in milliseconds
     uint32_t restart_count;     // Current restart count
     uint64_t window_start;      // When window started
+
+    // Backoff configuration
+    BackoffStrategy backoff;    // Backoff strategy for retries
+    uint32_t base_delay_ms;     // Base delay before retry (default: 1000)
+    uint32_t max_delay_ms;      // Maximum delay cap (default: 30000)
+    uint64_t next_retry_at;     // Timestamp when next retry is allowed
+
+    // Circuit breaker configuration
+    CircuitState circuit_state;
+    uint32_t failure_threshold;  // Failures before circuit opens (default: 5)
+    uint32_t failure_count;      // Current consecutive failures
+    uint64_t circuit_opened_at;  // When circuit was opened
+    uint32_t cooldown_ms;        // Time circuit stays open (default: 60000)
 } SupervisionConfig;
 
 // Forward declaration
@@ -123,6 +148,18 @@ bool process_can_restart(VegaProcess* proc);
 
 // Restart a process (creates new process with same agent)
 uint32_t process_restart(struct VegaVM* vm, VegaProcess* proc);
+
+// Schedule a retry with backoff (returns delay in ms, 0 if can retry now, -1 if cannot retry)
+int32_t process_schedule_retry(VegaProcess* proc);
+
+// Check if circuit breaker allows a request
+bool process_circuit_allows(VegaProcess* proc);
+
+// Record a success (resets failure count, closes circuit)
+void process_record_success(VegaProcess* proc);
+
+// Record a failure (increments failure count, may open circuit)
+void process_record_failure(VegaProcess* proc);
 
 // Add child to parent's child list
 void process_add_child(VegaProcess* parent, uint32_t child_pid);

@@ -83,6 +83,7 @@ typedef enum {
     TOK_NOT,            // !
     TOK_ARROW,          // ->
     TOK_MSG,            // <-
+    TOK_MSG_ASYNC,      // <~
     TOK_FATARROW,       // =>
     TOK_DOT,            // .
     TOK_COLON,          // :

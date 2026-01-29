@@ -170,13 +170,14 @@ AstSupervisionConfig* ast_supervision_config(AstRestartStrategy strategy, uint32
     return config;
 }
 
-AstExpr* ast_message(AstExpr* target, AstExpr* message, SourceLoc loc) {
+AstExpr* ast_message(AstExpr* target, AstExpr* message, bool is_async, SourceLoc loc) {
     AstExpr* expr = malloc(sizeof(AstExpr));
     if (!expr) return NULL;
     expr->kind = EXPR_MESSAGE;
     expr->loc = loc;
     expr->as.message.target = target;
     expr->as.message.message = message;
+    expr->as.message.is_async = is_async;
     return expr;
 }
 

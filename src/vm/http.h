@@ -3,12 +3,25 @@
 
 #include "../common/memory.h"
 #include <stdbool.h>
+#include <pthread.h>
 
 /*
  * Vega HTTP Client
  *
  * Handles communication with the Anthropic API.
+ * Supports both synchronous and asynchronous requests.
  */
+
+// ============================================================================
+// Token Usage (for budget tracking)
+// ============================================================================
+
+typedef struct {
+    uint32_t input_tokens;
+    uint32_t output_tokens;
+    uint32_t cache_read_tokens;
+    uint32_t cache_write_tokens;
+} HttpTokenUsage;
 
 // ============================================================================
 // Response Structure
@@ -19,6 +32,7 @@ typedef struct {
     char* body;
     size_t body_len;
     char* error;
+    HttpTokenUsage tokens;  // Parsed token usage from response
 } HttpResponse;
 
 // ============================================================================
@@ -117,5 +131,95 @@ HttpResponse* anthropic_send_tool_result_v2(
     int tool_count,
     double temperature
 );
+
+// ============================================================================
+// Async HTTP Support
+// ============================================================================
+
+typedef enum {
+    HTTP_ASYNC_PENDING,    // Request in progress
+    HTTP_ASYNC_COMPLETE,   // Request finished (check response)
+    HTTP_ASYNC_ERROR       // Request failed
+} HttpAsyncStatus;
+
+typedef enum {
+    HTTP_REQ_MESSAGES,         // anthropic_send_messages
+    HTTP_REQ_WITH_TOOLS,       // anthropic_send_with_tools
+    HTTP_REQ_TOOL_RESULT_V2    // anthropic_send_tool_result_v2
+} HttpRequestType;
+
+typedef struct HttpAsyncRequest {
+    // Thread management
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    HttpAsyncStatus status;
+    bool thread_started;  // True if pthread_create succeeded
+
+    // Request type and parameters
+    HttpRequestType type;
+    char* api_key;
+    char* model;
+    char* system_prompt;
+    char** messages;
+    int message_count;
+    double temperature;
+
+    // For tool requests
+    ToolDefinition* tools;
+    int tool_count;
+    char* assistant_content;  // For tool_result_v2
+    char* tool_use_id;
+    char* tool_result;
+
+    // Result
+    HttpResponse* response;
+} HttpAsyncRequest;
+
+// Start an async messages request
+HttpAsyncRequest* http_async_send_messages(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    double temperature
+);
+
+// Start an async request with tools
+HttpAsyncRequest* http_async_send_with_tools(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+);
+
+// Start an async tool result request
+HttpAsyncRequest* http_async_send_tool_result_v2(
+    const char* api_key,
+    const char* model,
+    const char* system_prompt,
+    const char** messages,
+    int message_count,
+    const char* assistant_content,
+    const char* tool_use_id,
+    const char* tool_result,
+    ToolDefinition* tools,
+    int tool_count,
+    double temperature
+);
+
+// Check if async request is complete (non-blocking)
+HttpAsyncStatus http_async_poll(HttpAsyncRequest* req);
+
+// Get result and free request (call after HTTP_ASYNC_COMPLETE)
+// Transfers ownership of response to caller
+HttpResponse* http_async_get_response(HttpAsyncRequest* req);
+
+// Cancel and free an async request
+void http_async_cancel(HttpAsyncRequest* req);
 
 #endif // VEGA_HTTP_H

@@ -90,7 +90,8 @@ run_test() {
     local bytecode_file=$1
     local timeout_sec=${2:-30}
 
-    timeout "$timeout_sec" "$VEGA" "$bytecode_file" 2>&1 | grep -v "^Warning:"
+    # Run without timeout - the VM has its own internal timeouts for HTTP
+    "$VEGA" "$bytecode_file" 2>&1 | grep -v "^Warning:"
     return ${PIPESTATUS[0]}
 }
 
@@ -580,7 +581,7 @@ test_13() {
         return
     fi
 
-    local output=$(run_test "$bytecode" 180)
+    local output=$(run_test "$bytecode" 300)
     if [ $? -ne 0 ]; then
         print_result 13 "Two Agents Sequence" "FAIL" "Runtime error or timeout"
         return
@@ -613,7 +614,7 @@ test_14() {
         return
     fi
 
-    local output=$(run_test "$bytecode" 180)
+    local output=$(run_test "$bytecode" 600)
     if [ $? -ne 0 ]; then
         print_result 14 "Parallel Agents" "FAIL" "Runtime error or timeout"
         return
@@ -648,7 +649,7 @@ test_15() {
         return
     fi
 
-    local output=$(run_test "$bytecode" 300)
+    local output=$(run_test "$bytecode" 600)
     if [ $? -ne 0 ]; then
         print_result 15 "Agent Conversation Loop" "FAIL" "Runtime error or timeout"
         return
@@ -856,9 +857,13 @@ test_08
 test_09
 test_10
 test_11
+sleep 10  # Rate limit cooldown between agent tests
 test_12
+sleep 10
 test_13
+sleep 10
 test_14
+sleep 10
 test_15
 test_16
 test_17

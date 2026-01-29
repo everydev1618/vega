@@ -6,6 +6,7 @@
  * Usage:
  *   vega program.vgb
  *   vega init [project-name]
+ *   vega tui [program.vgb]
  */
 
 #include <stdio.h>
@@ -18,16 +19,24 @@
 #include "http.h"
 #include "../common/memory.h"
 
+// TUI entry point (defined in tui/main.c)
+extern int tui_main(int argc, char* argv[]);
+
 static void print_usage(const char* prog) {
     fprintf(stderr, "Usage: %s <program.vgb> [options]\n", prog);
     fprintf(stderr, "       %s init [project-name]\n", prog);
+    fprintf(stderr, "       %s tui [program.vgb]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Commands:\n");
     fprintf(stderr, "  init [name]  Create a new Vega project\n");
+    fprintf(stderr, "  tui [file]   Launch interactive TUI mode\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  --debug     Print debug information\n");
-    fprintf(stderr, "  -h, --help  Show this help message\n");
+    fprintf(stderr, "  --debug              Print debug information\n");
+    fprintf(stderr, "  --budget-cost N      Set max cost in USD (e.g., 0.50)\n");
+    fprintf(stderr, "  --budget-input N     Set max input tokens\n");
+    fprintf(stderr, "  --budget-output N    Set max output tokens\n");
+    fprintf(stderr, "  -h, --help           Show this help message\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Environment:\n");
     fprintf(stderr, "  ANTHROPIC_API_KEY  Required for agent operations\n");
@@ -241,8 +250,15 @@ int main(int argc, char* argv[]) {
         return cmd_init(argc, argv);
     }
 
+    if (argc >= 2 && strcmp(argv[1], "tui") == 0) {
+        return tui_main(argc - 1, argv + 1);
+    }
+
     const char* input_file = NULL;
     bool debug = false;
+    double budget_cost = 0.0;
+    uint64_t budget_input = 0;
+    uint64_t budget_output = 0;
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -251,6 +267,24 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (strcmp(argv[i], "--debug") == 0) {
             debug = true;
+        } else if (strcmp(argv[i], "--budget-cost") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: --budget-cost requires a value\n");
+                return 1;
+            }
+            budget_cost = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--budget-input") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: --budget-input requires a value\n");
+                return 1;
+            }
+            budget_input = strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--budget-output") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: --budget-output requires a value\n");
+                return 1;
+            }
+            budget_output = strtoull(argv[++i], NULL, 10);
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
             print_usage(argv[0]);
@@ -286,6 +320,26 @@ int main(int argc, char* argv[]) {
     VegaVM vm;
     vm_init(&vm);
 
+    // Set budget limits if specified
+    if (budget_cost > 0.0) {
+        vm_set_budget_cost(&vm, budget_cost);
+        if (debug) {
+            printf("Budget limit: $%.4f\n", budget_cost);
+        }
+    }
+    if (budget_input > 0) {
+        vm_set_budget_input_tokens(&vm, budget_input);
+        if (debug) {
+            printf("Budget input tokens: %llu\n", (unsigned long long)budget_input);
+        }
+    }
+    if (budget_output > 0) {
+        vm_set_budget_output_tokens(&vm, budget_output);
+        if (debug) {
+            printf("Budget output tokens: %llu\n", (unsigned long long)budget_output);
+        }
+    }
+
     // Load bytecode
     if (!vm_load_file(&vm, input_file)) {
         fprintf(stderr, "Error: %s\n", vm_error_msg(&vm));
@@ -309,6 +363,14 @@ int main(int argc, char* argv[]) {
 
     if (!success) {
         fprintf(stderr, "Runtime error: %s\n", vm_error_msg(&vm));
+    }
+
+    // Print budget usage if any tokens were used
+    if (vm.budget_used_input_tokens > 0 || vm.budget_used_output_tokens > 0) {
+        printf("\n--- Token Usage ---\n");
+        printf("Input:  %llu tokens\n", (unsigned long long)vm.budget_used_input_tokens);
+        printf("Output: %llu tokens\n", (unsigned long long)vm.budget_used_output_tokens);
+        printf("Cost:   $%.4f\n", vm.budget_used_cost_usd);
     }
 
     if (debug) {

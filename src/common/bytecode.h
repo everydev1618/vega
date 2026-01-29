@@ -62,9 +62,10 @@ typedef enum {
 
     // Agent Operations (0x60 - 0x6F)
     OP_SPAWN_AGENT  = 0x60,  // Spawn agent: [agent_id:u16] -> handle
-    OP_SEND_MSG     = 0x61,  // Send message: handle, msg -> response
+    OP_SEND_MSG     = 0x61,  // Send message (sync): handle, msg -> response
     OP_SPAWN_ASYNC  = 0x62,  // Spawn async agent: [agent_id:u16] -> future
     OP_AWAIT        = 0x63,  // Await future: future -> response
+    OP_SEND_ASYNC   = 0x64,  // Send message (async): handle, msg -> future
 
     // Object/Method Operations (0x70 - 0x7F)
     OP_GET_FIELD    = 0x70,  // Get field: obj, name -> value
