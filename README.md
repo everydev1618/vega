@@ -38,7 +38,7 @@ Vega's runtime handles all of that:
 | Rate limits | Manual backoff logic | Built into the VM |
 | Cost overruns | Hope for the best | `budget $5.00 { ... }` |
 | Parallel calls | asyncio complexity | Automatic dataflow analysis |
-| Observability | Add logging manually | Every call traced by default |
+| Observability | Add logging manually | Built-in TUI with full tracing |
 
 ## Quick Start
 
@@ -54,6 +54,47 @@ export ANTHROPIC_API_KEY=sk-...              # Option 2: environment variable
 ./bin/vegac examples/hello.vega -o hello.vgb
 ./bin/vega hello.vgb
 ```
+
+## Interactive TUI
+
+Vega includes a full terminal UI for visualizing agent execution in real-time:
+
+```bash
+# Launch TUI with a program
+./bin/vega tui program.vgb
+
+# Or launch interactively and load programs via REPL
+./bin/vega tui
+```
+
+The TUI provides:
+- **Agents panel**: Track spawned agents, models, and token usage
+- **Messages panel**: View conversation history for selected agent
+- **Tools panel**: Monitor tool calls and results
+- **Logs panel**: Real-time HTTP requests, timing, and token counts
+- **REPL**: Load programs, run commands, inspect state
+
+```
++------------------------------------------------------------------+
+| Vega TUI                                 In:1.2K Out:892 [F1:Help]|
++---------------------------+--------------------------------------+
+| AGENTS                    | MESSAGES                             |
+| > Coder                   | USER: Write a sort function          |
+|   claude-sonnet-4-20250514|                                      |
+|   tok: 2.1K               | ASST: Here's an efficient quicksort  |
++---------------------------+--------------------------------------+
+| TOOLS                     | LOGS                                 |
+| read_file                 | [10:23:45] HTTP 200 (1.2s) in:523    |
+|   -> src/main.c           | [10:23:46] Agent spawned: Coder      |
+|   <- 1.2KB                | [10:23:48] <- Coder (2.1s)           |
++---------------------------+--------------------------------------+
+| > _                                                              |
++------------------------------------------------------------------+
+```
+
+**Keys**: Tab (switch panels), Up/Down (navigate), F1 (help), F10 (quit)
+
+**Commands**: `load <file>`, `run`, `agents`, `clear`, `help`, `quit`
 
 ## Language Overview
 
@@ -247,6 +288,7 @@ print(value)   // Print any value
 src/
   compiler/    # Lexer, parser, semantic analysis, code generation
   vm/          # Bytecode interpreter, agent runtime, scheduler
+  tui/         # Terminal UI and tracing system
   common/      # Shared utilities (memory management, bytecode spec)
 stdlib/        # Standard library (math, string, etc.)
 examples/      # Example programs
@@ -272,12 +314,31 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 Requirements:
 - C compiler (gcc or clang)
 - libcurl
+- ncurses (for TUI)
 - make
 
 ```bash
 make              # Build everything
 make clean        # Clean build artifacts
+make release      # Optimized build
 make run EXAMPLE=hello   # Compile and run an example
+make tui EXAMPLE=hello   # Run example in TUI mode
+```
+
+### Cross-Compilation for Linux
+
+Build Linux binaries from macOS using Docker:
+
+```bash
+make linux        # Outputs to bin-linux/
+```
+
+### CI/CD
+
+GitHub Actions automatically builds and tests on Linux and macOS. Release artifacts are attached when you create a GitHub release:
+
+```bash
+gh release create v0.1.0 --title "Vega v0.1.0"
 ```
 
 ## Status
@@ -289,6 +350,7 @@ The core language is functional:
 - Supervision (process model, restart strategies)
 - Anthropic API integration
 - Import system and standard library
+- Interactive TUI with tracing and REPL
 
 See [docs/TODO.md](docs/TODO.md) for the roadmap.
 
